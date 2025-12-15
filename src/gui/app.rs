@@ -274,7 +274,15 @@ impl InputLogViewerApp {
                         ui.separator();
 
                         // Frame counter
-                        ui.label("Frame: 0 / 0");
+                        let total_frames = self
+                            .log
+                            .as_ref()
+                            .map(|l| l.metadata.frame_count)
+                            .unwrap_or(0);
+                        ui.label(format!(
+                            "Frame: {} / {}",
+                            self.timeline_config.current_frame, total_frames
+                        ));
 
                         ui.separator();
 
