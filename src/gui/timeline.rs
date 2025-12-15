@@ -35,7 +35,7 @@ impl Default for TimelineConfig {
     fn default() -> Self {
         Self {
             scroll_offset: 0,
-            visible_frames: DEFAULT_VISIBLE_FRAMES,
+            visible_frames: DEFAULT_VISIBLE_FRAMES.max(1),
         }
     }
 }
@@ -152,8 +152,8 @@ impl<'a> TimelineRenderer<'a> {
         let start_frame = self.config.scroll_offset;
         let end_frame = start_frame + self.config.visible_frames;
 
-        // Align to interval
-        let first_marker = ((start_frame / interval) * interval).max(start_frame);
+        // Align to interval (ceiling division to get next multiple >= start_frame)
+        let first_marker = ((start_frame + interval - 1) / interval) * interval;
 
         let mut frame = first_marker;
         while frame <= end_frame {
@@ -267,7 +267,8 @@ impl<'a> TimelineRenderer<'a> {
         let start_frame = self.config.scroll_offset;
         let end_frame = start_frame + self.config.visible_frames;
 
-        let first_marker = ((start_frame / interval) * interval).max(start_frame);
+        // Align to interval (ceiling division to get next multiple >= start_frame)
+        let first_marker = ((start_frame + interval - 1) / interval) * interval;
 
         let mut frame = first_marker;
         while frame <= end_frame {
@@ -398,9 +399,10 @@ impl<'a> TimelineRenderer<'a> {
         let bar_height = cell_height * 0.6;
         let center_y = row_top + ROW_HEIGHT / 2.0;
 
-        // Calculate bar dimensions
-        let max_bar_width = frame_width - CELL_PADDING * 2.0;
-        let bar_width = max_bar_width * abs_value;
+        // Calculate bar dimensions using explicit half-cell width
+        // This ensures magnitude 1.0 fills from center to cell edge
+        let max_half_width = (frame_width - CELL_PADDING * 2.0) / 2.0;
+        let half_width = max_half_width * abs_value;
 
         // Center point of the cell
         let cell_center_x = x + frame_width / 2.0;
@@ -410,13 +412,13 @@ impl<'a> TimelineRenderer<'a> {
             // Positive: bar extends to the right
             Rect::from_min_size(
                 Pos2::new(cell_center_x, center_y - bar_height / 2.0),
-                egui::vec2(bar_width / 2.0, bar_height),
+                egui::vec2(half_width, bar_height),
             )
         } else {
             // Negative: bar extends to the left
             Rect::from_min_size(
-                Pos2::new(cell_center_x - bar_width / 2.0, center_y - bar_height / 2.0),
-                egui::vec2(bar_width / 2.0, bar_height),
+                Pos2::new(cell_center_x - half_width, center_y - bar_height / 2.0),
+                egui::vec2(half_width, bar_height),
             )
         };
 
