@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use crate::core::log::InputLog;
 use crate::core::parser;
 
+use super::timeline::{TimelineConfig, TimelineRenderer};
+
 /// Application state indicating the current loading status.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum AppState {
@@ -70,6 +72,8 @@ pub struct InputLogViewerApp {
     loaded_file_path: Option<PathBuf>,
     /// Status message to display (success/error notifications)
     status_message: Option<StatusMessage>,
+    /// Timeline rendering configuration
+    timeline_config: TimelineConfig,
 }
 
 impl InputLogViewerApp {
@@ -80,6 +84,7 @@ impl InputLogViewerApp {
             log: None,
             loaded_file_path: None,
             status_message: None,
+            timeline_config: TimelineConfig::default(),
         }
     }
 
@@ -383,26 +388,11 @@ impl InputLogViewerApp {
             });
 
             ui.separator();
+            ui.add_space(5.0);
 
-            // Show mappings info if available
-            if !log.mappings.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.label("Input Mappings:");
-                    for mapping in &log.mappings {
-                        let color = mapping
-                            .color
-                            .map(|c| egui::Color32::from_rgb(c[0], c[1], c[2]))
-                            .unwrap_or(egui::Color32::GRAY);
-                        ui.colored_label(color, &mapping.name);
-                    }
-                });
-                ui.separator();
-            }
-
-            ui.add_space(10.0);
-
-            // Draw timeline grid with loaded data
-            self.draw_timeline_grid(ui, log);
+            // Render the timeline using TimelineRenderer
+            let renderer = TimelineRenderer::new(log, &self.timeline_config);
+            renderer.render(ui);
         }
     }
 
@@ -469,111 +459,6 @@ impl InputLogViewerApp {
             "(Timeline will appear here)",
             egui::FontId::proportional(16.0),
             egui::Color32::DARK_GRAY,
-        );
-    }
-
-    /// Draw the timeline grid with loaded data.
-    fn draw_timeline_grid(&self, ui: &mut egui::Ui, log: &InputLog) {
-        let available_size = ui.available_size();
-        let num_rows = log.mappings.len().max(5);
-        let grid_height = (num_rows as f32 * 40.0)
-            .min(available_size.y - 20.0)
-            .max(200.0);
-
-        let (response, painter) = ui.allocate_painter(
-            egui::vec2(available_size.x - 20.0, grid_height),
-            egui::Sense::hover(),
-        );
-
-        let rect = response.rect;
-        let stroke = egui::Stroke::new(1.0, egui::Color32::DARK_GRAY);
-
-        // Draw border
-        painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
-
-        // Draw row labels on the left
-        let label_width = 120.0;
-        let timeline_rect =
-            egui::Rect::from_min_max(egui::pos2(rect.left() + label_width, rect.top()), rect.max);
-
-        let row_height = rect.height() / num_rows as f32;
-
-        // Draw horizontal grid lines and labels
-        for i in 0..num_rows {
-            let y = rect.top() + row_height * (i as f32 + 0.5);
-
-            // Draw row separator
-            if i > 0 {
-                let separator_y = rect.top() + row_height * i as f32;
-                painter.line_segment(
-                    [
-                        egui::pos2(rect.left(), separator_y),
-                        egui::pos2(rect.right(), separator_y),
-                    ],
-                    egui::Stroke::new(0.5, egui::Color32::DARK_GRAY),
-                );
-            }
-
-            // Draw label
-            let (label, color) = if i < log.mappings.len() {
-                let mapping = &log.mappings[i];
-                let c = mapping
-                    .color
-                    .map(|c| egui::Color32::from_rgb(c[0], c[1], c[2]))
-                    .unwrap_or(egui::Color32::LIGHT_GRAY);
-                (mapping.name.as_str(), c)
-            } else {
-                ("(No mapping)", egui::Color32::GRAY)
-            };
-
-            painter.text(
-                egui::pos2(rect.left() + 5.0, y),
-                egui::Align2::LEFT_CENTER,
-                label,
-                egui::FontId::default(),
-                color,
-            );
-        }
-
-        // Draw vertical timeline separator
-        painter.line_segment(
-            [
-                egui::pos2(timeline_rect.left(), rect.top()),
-                egui::pos2(timeline_rect.left(), rect.bottom()),
-            ],
-            stroke,
-        );
-
-        // Draw frame markers
-        let visible_frames = 100.min(log.metadata.frame_count.max(1));
-        let frame_width = timeline_rect.width() / visible_frames as f32;
-
-        for i in 0..=10 {
-            let frame = (visible_frames as f32 * i as f32 / 10.0) as u64;
-            let x = timeline_rect.left() + (frame as f32 * frame_width);
-
-            painter.line_segment(
-                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                egui::Stroke::new(0.5, egui::Color32::DARK_GRAY),
-            );
-
-            // Draw frame number
-            painter.text(
-                egui::pos2(x, rect.top() + 10.0),
-                egui::Align2::CENTER_CENTER,
-                format!("{}", frame),
-                egui::FontId::proportional(10.0),
-                egui::Color32::GRAY,
-            );
-        }
-
-        // Draw center text indicating timeline is loaded but not yet interactive
-        painter.text(
-            timeline_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "(Timeline rendering - playback coming in Phase 2)",
-            egui::FontId::proportional(14.0),
-            egui::Color32::from_rgba_unmultiplied(128, 128, 128, 180),
         );
     }
 }
