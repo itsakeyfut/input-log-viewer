@@ -4,23 +4,141 @@
 //! to provide the core GUI functionality for the input log viewer.
 
 use eframe::egui;
+use std::path::PathBuf;
+
+use crate::core::log::InputLog;
+use crate::core::parser;
+
+/// Application state indicating the current loading status.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum AppState {
+    /// No file has been loaded yet (initial state)
+    #[default]
+    NoFileLoaded,
+    /// A file has been successfully loaded and is ready for viewing
+    Ready,
+    /// An error occurred during loading
+    Error(String),
+}
+
+/// Kind of status message to display.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StatusKind {
+    /// Success message (shown in green)
+    Success,
+    /// Error message (shown in red)
+    Error,
+}
+
+/// A status message with its kind and timestamp.
+#[derive(Debug, Clone)]
+pub struct StatusMessage {
+    /// The message text
+    pub text: String,
+    /// Kind of message (success/error)
+    pub kind: StatusKind,
+    /// When the message was created (for auto-dismiss)
+    pub created_at: std::time::Instant,
+}
+
+impl StatusMessage {
+    /// Create a new status message.
+    pub fn new(text: impl Into<String>, kind: StatusKind) -> Self {
+        Self {
+            text: text.into(),
+            kind,
+            created_at: std::time::Instant::now(),
+        }
+    }
+
+    /// Duration to show status messages before auto-dismissing.
+    const DISPLAY_DURATION: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Check if the message should still be displayed.
+    pub fn is_visible(&self) -> bool {
+        self.created_at.elapsed() < Self::DISPLAY_DURATION
+    }
+}
 
 /// Main application state and GUI logic.
 pub struct InputLogViewerApp {
-    // Placeholder for future state fields
-    // Will be expanded in later phases to include:
-    // - AppState (loading state)
-    // - InputLog data
-    // - PlaybackState
-    // - ViewState
-    // - Bookmarks
-    // - Config
+    /// Current application state
+    state: AppState,
+    /// Loaded input log data (Some when state is Ready)
+    log: Option<InputLog>,
+    /// Path to the currently loaded file
+    loaded_file_path: Option<PathBuf>,
+    /// Status message to display (success/error notifications)
+    status_message: Option<StatusMessage>,
 }
 
 impl InputLogViewerApp {
     /// Create a new application instance.
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        Self {}
+        Self {
+            state: AppState::NoFileLoaded,
+            log: None,
+            loaded_file_path: None,
+            status_message: None,
+        }
+    }
+
+    /// Open a file dialog and load the selected .ilj file.
+    fn open_file_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Input Log JSON", &["ilj"])
+            .set_title("Open Input Log File")
+            .pick_file()
+        {
+            self.load_file(path);
+        }
+    }
+
+    /// Load an input log file from the given path.
+    fn load_file(&mut self, path: PathBuf) {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => match parser::parse_json(&content) {
+                Ok(log) => {
+                    let frame_count = log.metadata.frame_count;
+                    let event_count = log.events.len();
+                    self.log = Some(log);
+                    self.loaded_file_path = Some(path.clone());
+                    self.state = AppState::Ready;
+                    self.status_message = Some(StatusMessage::new(
+                        format!(
+                            "Loaded: {} ({} frames, {} events)",
+                            path.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "file".to_string()),
+                            frame_count,
+                            event_count
+                        ),
+                        StatusKind::Success,
+                    ));
+                }
+                Err(e) => {
+                    self.set_error(format!("Parse error: {}", e));
+                }
+            },
+            Err(e) => {
+                self.set_error(format!("Failed to read file: {}", e));
+            }
+        }
+    }
+
+    /// Set an error state and display an error message.
+    fn set_error(&mut self, message: String) {
+        self.state = AppState::Error(message.clone());
+        self.status_message = Some(StatusMessage::new(message, StatusKind::Error));
+    }
+
+    /// Clear error state and return to appropriate state.
+    fn clear_error(&mut self) {
+        if self.log.is_some() {
+            self.state = AppState::Ready;
+        } else {
+            self.state = AppState::NoFileLoaded;
+        }
     }
 }
 
@@ -42,9 +160,9 @@ impl InputLogViewerApp {
                 ui.heading("Input Log Viewer");
                 ui.separator();
 
-                // File loading button placeholder
+                // File loading button
                 if ui.button("📂 Open File").clicked() {
-                    // TODO: Implement file dialog in Phase 2
+                    self.open_file_dialog();
                 }
 
                 ui.separator();
@@ -65,8 +183,60 @@ impl InputLogViewerApp {
                 if ui.button("🔍 Search").clicked() {
                     // TODO: Implement search dialog in Phase 3
                 }
+
+                // Show status message in toolbar (right-aligned)
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.render_status_message(ui);
+                });
             });
         });
+    }
+
+    /// Render the status message if one is active.
+    fn render_status_message(&mut self, ui: &mut egui::Ui) {
+        // Check if we should dismiss the message
+        let should_dismiss = self
+            .status_message
+            .as_ref()
+            .is_some_and(|msg| !msg.is_visible());
+
+        if should_dismiss {
+            self.status_message = None;
+            // Also clear error state if the error message expired
+            if matches!(self.state, AppState::Error(_)) {
+                self.clear_error();
+            }
+            return;
+        }
+
+        // Extract message info before rendering to avoid borrow issues
+        let msg_info = self.status_message.as_ref().map(|msg| {
+            let color = match msg.kind {
+                StatusKind::Success => egui::Color32::from_rgb(76, 175, 80), // Green
+                StatusKind::Error => egui::Color32::from_rgb(244, 67, 54),   // Red
+            };
+            (color, msg.text.clone())
+        });
+
+        if let Some((color, text)) = msg_info {
+            let mut dismiss_clicked = false;
+
+            ui.horizontal(|ui| {
+                // Dismiss button
+                if ui.small_button("✕").clicked() {
+                    dismiss_clicked = true;
+                }
+                ui.colored_label(color, &text);
+            });
+
+            // Handle dismiss after the closure
+            if dismiss_clicked {
+                self.status_message = None;
+                if matches!(self.state, AppState::Error(_)) {
+                    self.clear_error();
+                }
+            }
+        }
     }
 
     /// Render the bottom controls section.
@@ -144,104 +314,266 @@ impl InputLogViewerApp {
     /// Displays the main timeline view with input events.
     fn render_timeline(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Timeline header
-            ui.vertical_centered(|ui| {
-                ui.add_space(20.0);
-
-                // Show placeholder content when no file is loaded
-                ui.heading("📁 No File Loaded");
-                ui.add_space(10.0);
-                ui.label("Drag and drop an input log file (.ilj or .ilb) to get started.");
-                ui.label("Or use the \"Open File\" button in the toolbar.");
-
-                ui.add_space(20.0);
-
-                // Show expected timeline layout as placeholder
-                ui.separator();
-                ui.add_space(10.0);
-                ui.label("Timeline preview area:");
-                ui.add_space(10.0);
-
-                // Draw placeholder timeline grid
-                let available_size = ui.available_size();
-                let (response, painter) = ui.allocate_painter(
-                    egui::vec2(available_size.x.min(800.0), 200.0),
-                    egui::Sense::hover(),
-                );
-
-                let rect = response.rect;
-                let stroke = egui::Stroke::new(1.0, egui::Color32::GRAY);
-
-                // Draw border
-                painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
-
-                // Draw horizontal grid lines (input rows)
-                let row_height = rect.height() / 5.0;
-                for i in 1..5 {
-                    let y = rect.top() + row_height * i as f32;
-                    painter.line_segment(
-                        [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                        stroke,
-                    );
+            match &self.state {
+                AppState::NoFileLoaded => {
+                    self.render_no_file_placeholder(ui);
                 }
-
-                // Draw vertical grid lines (frame columns)
-                let col_width = rect.width() / 10.0;
-                for i in 1..10 {
-                    let x = rect.left() + col_width * i as f32;
-                    painter.line_segment(
-                        [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                        stroke,
-                    );
+                AppState::Ready => {
+                    self.render_loaded_timeline(ui);
                 }
-
-                // Draw placeholder labels
-                let label_color = egui::Color32::LIGHT_GRAY;
-                painter.text(
-                    egui::pos2(rect.left() + 5.0, rect.top() + row_height * 0.5),
-                    egui::Align2::LEFT_CENTER,
-                    "A Button",
-                    egui::FontId::default(),
-                    label_color,
-                );
-                painter.text(
-                    egui::pos2(rect.left() + 5.0, rect.top() + row_height * 1.5),
-                    egui::Align2::LEFT_CENTER,
-                    "B Button",
-                    egui::FontId::default(),
-                    label_color,
-                );
-                painter.text(
-                    egui::pos2(rect.left() + 5.0, rect.top() + row_height * 2.5),
-                    egui::Align2::LEFT_CENTER,
-                    "X Button",
-                    egui::FontId::default(),
-                    label_color,
-                );
-                painter.text(
-                    egui::pos2(rect.left() + 5.0, rect.top() + row_height * 3.5),
-                    egui::Align2::LEFT_CENTER,
-                    "Left Stick X",
-                    egui::FontId::default(),
-                    label_color,
-                );
-                painter.text(
-                    egui::pos2(rect.left() + 5.0, rect.top() + row_height * 4.5),
-                    egui::Align2::LEFT_CENTER,
-                    "Left Stick Y",
-                    egui::FontId::default(),
-                    label_color,
-                );
-
-                // Draw center text
-                painter.text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "(Timeline will appear here)",
-                    egui::FontId::proportional(16.0),
-                    egui::Color32::DARK_GRAY,
-                );
-            });
+                AppState::Error(_) => {
+                    // Show placeholder even in error state
+                    self.render_no_file_placeholder(ui);
+                }
+            }
         });
+    }
+
+    /// Render the placeholder view when no file is loaded.
+    fn render_no_file_placeholder(&self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(20.0);
+
+            ui.heading("📁 No File Loaded");
+            ui.add_space(10.0);
+            ui.label("Drag and drop an input log file (.ilj or .ilb) to get started.");
+            ui.label("Or use the \"Open File\" button in the toolbar.");
+
+            ui.add_space(20.0);
+
+            // Show expected timeline layout as placeholder
+            ui.separator();
+            ui.add_space(10.0);
+            ui.label("Timeline preview area:");
+            ui.add_space(10.0);
+
+            self.draw_placeholder_grid(ui);
+        });
+    }
+
+    /// Render the timeline view when a file is loaded.
+    fn render_loaded_timeline(&self, ui: &mut egui::Ui) {
+        if let Some(ref log) = self.log {
+            // Show file info header
+            ui.horizontal(|ui| {
+                ui.heading("📊 Timeline");
+                ui.separator();
+
+                if let Some(ref path) = self.loaded_file_path {
+                    ui.label(format!(
+                        "File: {}",
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "Unknown".to_string())
+                    ));
+                }
+
+                ui.separator();
+                ui.label(format!(
+                    "Frames: {} | FPS: {} | Events: {}",
+                    log.metadata.frame_count,
+                    log.metadata.target_fps,
+                    log.events.len()
+                ));
+
+                if let Some(ref source) = log.metadata.source {
+                    ui.separator();
+                    ui.label(format!("Source: {}", source));
+                }
+            });
+
+            ui.separator();
+
+            // Show mappings info if available
+            if !log.mappings.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label("Input Mappings:");
+                    for mapping in &log.mappings {
+                        let color = mapping
+                            .color
+                            .map(|c| egui::Color32::from_rgb(c[0], c[1], c[2]))
+                            .unwrap_or(egui::Color32::GRAY);
+                        ui.colored_label(color, &mapping.name);
+                    }
+                });
+                ui.separator();
+            }
+
+            ui.add_space(10.0);
+
+            // Draw timeline grid with loaded data
+            self.draw_timeline_grid(ui, log);
+        }
+    }
+
+    /// Draw a placeholder grid for the timeline preview.
+    fn draw_placeholder_grid(&self, ui: &mut egui::Ui) {
+        let available_size = ui.available_size();
+        let (response, painter) = ui.allocate_painter(
+            egui::vec2(available_size.x.min(800.0), 200.0),
+            egui::Sense::hover(),
+        );
+
+        let rect = response.rect;
+        let stroke = egui::Stroke::new(1.0, egui::Color32::GRAY);
+
+        // Draw border
+        painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+
+        // Draw horizontal grid lines (input rows)
+        let row_height = rect.height() / 5.0;
+        for i in 1..5 {
+            let y = rect.top() + row_height * i as f32;
+            painter.line_segment(
+                [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                stroke,
+            );
+        }
+
+        // Draw vertical grid lines (frame columns)
+        let col_width = rect.width() / 10.0;
+        for i in 1..10 {
+            let x = rect.left() + col_width * i as f32;
+            painter.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                stroke,
+            );
+        }
+
+        // Draw placeholder labels
+        let label_color = egui::Color32::LIGHT_GRAY;
+        let labels = [
+            "A Button",
+            "B Button",
+            "X Button",
+            "Left Stick X",
+            "Left Stick Y",
+        ];
+        for (i, label) in labels.iter().enumerate() {
+            painter.text(
+                egui::pos2(
+                    rect.left() + 5.0,
+                    rect.top() + row_height * (i as f32 + 0.5),
+                ),
+                egui::Align2::LEFT_CENTER,
+                *label,
+                egui::FontId::default(),
+                label_color,
+            );
+        }
+
+        // Draw center text
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "(Timeline will appear here)",
+            egui::FontId::proportional(16.0),
+            egui::Color32::DARK_GRAY,
+        );
+    }
+
+    /// Draw the timeline grid with loaded data.
+    fn draw_timeline_grid(&self, ui: &mut egui::Ui, log: &InputLog) {
+        let available_size = ui.available_size();
+        let num_rows = log.mappings.len().max(5);
+        let grid_height = (num_rows as f32 * 40.0)
+            .min(available_size.y - 20.0)
+            .max(200.0);
+
+        let (response, painter) = ui.allocate_painter(
+            egui::vec2(available_size.x - 20.0, grid_height),
+            egui::Sense::hover(),
+        );
+
+        let rect = response.rect;
+        let stroke = egui::Stroke::new(1.0, egui::Color32::DARK_GRAY);
+
+        // Draw border
+        painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+
+        // Draw row labels on the left
+        let label_width = 120.0;
+        let timeline_rect =
+            egui::Rect::from_min_max(egui::pos2(rect.left() + label_width, rect.top()), rect.max);
+
+        let row_height = rect.height() / num_rows as f32;
+
+        // Draw horizontal grid lines and labels
+        for i in 0..num_rows {
+            let y = rect.top() + row_height * (i as f32 + 0.5);
+
+            // Draw row separator
+            if i > 0 {
+                let separator_y = rect.top() + row_height * i as f32;
+                painter.line_segment(
+                    [
+                        egui::pos2(rect.left(), separator_y),
+                        egui::pos2(rect.right(), separator_y),
+                    ],
+                    egui::Stroke::new(0.5, egui::Color32::DARK_GRAY),
+                );
+            }
+
+            // Draw label
+            let (label, color) = if i < log.mappings.len() {
+                let mapping = &log.mappings[i];
+                let c = mapping
+                    .color
+                    .map(|c| egui::Color32::from_rgb(c[0], c[1], c[2]))
+                    .unwrap_or(egui::Color32::LIGHT_GRAY);
+                (mapping.name.as_str(), c)
+            } else {
+                ("(No mapping)", egui::Color32::GRAY)
+            };
+
+            painter.text(
+                egui::pos2(rect.left() + 5.0, y),
+                egui::Align2::LEFT_CENTER,
+                label,
+                egui::FontId::default(),
+                color,
+            );
+        }
+
+        // Draw vertical timeline separator
+        painter.line_segment(
+            [
+                egui::pos2(timeline_rect.left(), rect.top()),
+                egui::pos2(timeline_rect.left(), rect.bottom()),
+            ],
+            stroke,
+        );
+
+        // Draw frame markers
+        let visible_frames = 100.min(log.metadata.frame_count.max(1));
+        let frame_width = timeline_rect.width() / visible_frames as f32;
+
+        for i in 0..=10 {
+            let frame = (visible_frames as f32 * i as f32 / 10.0) as u64;
+            let x = timeline_rect.left() + (frame as f32 * frame_width);
+
+            painter.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                egui::Stroke::new(0.5, egui::Color32::DARK_GRAY),
+            );
+
+            // Draw frame number
+            painter.text(
+                egui::pos2(x, rect.top() + 10.0),
+                egui::Align2::CENTER_CENTER,
+                format!("{}", frame),
+                egui::FontId::proportional(10.0),
+                egui::Color32::GRAY,
+            );
+        }
+
+        // Draw center text indicating timeline is loaded but not yet interactive
+        painter.text(
+            timeline_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "(Timeline rendering - playback coming in Phase 2)",
+            egui::FontId::proportional(14.0),
+            egui::Color32::from_rgba_unmultiplied(128, 128, 128, 180),
+        );
     }
 }
