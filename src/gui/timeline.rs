@@ -29,6 +29,8 @@ pub struct TimelineConfig {
     pub scroll_offset: u64,
     /// Number of frames to display
     pub visible_frames: u64,
+    /// Current frame position (for playback indicator)
+    pub current_frame: u64,
 }
 
 impl Default for TimelineConfig {
@@ -36,6 +38,7 @@ impl Default for TimelineConfig {
         Self {
             scroll_offset: 0,
             visible_frames: DEFAULT_VISIBLE_FRAMES.max(1),
+            current_frame: 0,
         }
     }
 }
@@ -120,6 +123,7 @@ impl<'a> TimelineRenderer<'a> {
         self.draw_row_labels(&painter, rect, num_rows);
         self.draw_grid(&painter, rect, timeline_rect, num_rows);
         self.draw_events(&painter, timeline_rect);
+        self.draw_current_frame_indicator(&painter, rect, timeline_rect);
     }
 
     /// Draw the background and border.
@@ -487,5 +491,41 @@ impl<'a> TimelineRenderer<'a> {
             dot_radius,
             color.gamma_multiply(intensity),
         );
+    }
+
+    /// Draw a vertical highlight line at the current frame position.
+    fn draw_current_frame_indicator(&self, painter: &Painter, rect: Rect, timeline_rect: Rect) {
+        let start_frame = self.config.scroll_offset;
+        let end_frame = start_frame + self.config.visible_frames;
+
+        // Only draw if current frame is within visible range
+        if self.config.current_frame < start_frame || self.config.current_frame >= end_frame {
+            return;
+        }
+
+        let frame_width = timeline_rect.width() / self.config.visible_frames as f32;
+        let x = timeline_rect.left()
+            + ((self.config.current_frame - start_frame) as f32 * frame_width)
+            + frame_width / 2.0;
+
+        // Draw the vertical highlight line (full height from header to bottom)
+        let highlight_color = Color32::from_rgba_unmultiplied(255, 200, 100, 180);
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            Stroke::new(2.0, highlight_color),
+        );
+
+        // Draw a small triangle marker at the top
+        let triangle_size = 6.0;
+        let triangle_points = [
+            Pos2::new(x - triangle_size, rect.top()),
+            Pos2::new(x + triangle_size, rect.top()),
+            Pos2::new(x, rect.top() + triangle_size * 1.5),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            triangle_points.to_vec(),
+            highlight_color,
+            Stroke::NONE,
+        ));
     }
 }
