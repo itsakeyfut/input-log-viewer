@@ -190,7 +190,8 @@ fn convert_event(json: JsonEvent) -> Result<InputEvent, ParseError> {
 fn parse_hex_color(hex: &str) -> Result<[u8; 3], ParseError> {
     let hex = hex.trim_start_matches('#');
 
-    if hex.len() != 6 {
+    // Check length and ensure ASCII to prevent panic on UTF-8 multi-byte slicing
+    if hex.len() != 6 || !hex.is_ascii() {
         return Err(ParseError::InvalidColor {
             value: format!("#{}", hex),
         });
@@ -256,6 +257,7 @@ mod tests {
         assert!(parse_hex_color("#FFF").is_err()); // Too short
         assert!(parse_hex_color("#FFFFFFF").is_err()); // Too long
         assert!(parse_hex_color("#GGGGGG").is_err()); // Invalid hex
+        assert!(parse_hex_color("你好").is_err()); // Non-ASCII (6 bytes but multi-byte UTF-8)
     }
 
     #[test]
