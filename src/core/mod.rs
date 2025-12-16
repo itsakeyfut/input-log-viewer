@@ -4,3 +4,4 @@ pub mod filter;
 pub mod log;
 pub mod parser;
 pub mod playback;
+pub mod search;

@@ -7,9 +7,10 @@ use eframe::egui;
 use std::path::PathBuf;
 
 use crate::core::filter::FilterState;
-use crate::core::log::InputLog;
+use crate::core::log::{ButtonState, InputKind, InputLog};
 use crate::core::parser;
 use crate::core::playback::PlaybackState;
+use crate::core::search::{SearchQuery, SearchResult, find_matches};
 
 use super::controls::{ControlAction, ControlsRenderer};
 use super::timeline::{TimelineConfig, TimelineRenderer};
@@ -129,6 +130,43 @@ impl StatusMessage {
     }
 }
 
+/// State for the search dialog and results.
+#[derive(Debug, Clone, Default)]
+pub struct SearchState {
+    /// Whether the search dialog is currently open
+    pub dialog_open: bool,
+    /// Currently selected input ID for searching (index in mappings, not the actual ID)
+    pub selected_input_index: usize,
+    /// Currently selected button state for searching (0=Any, 1=Pressed, 2=Released)
+    pub selected_state_index: usize,
+    /// Current search results
+    pub results: SearchResult,
+    /// Whether a search has been performed
+    pub has_searched: bool,
+}
+
+impl SearchState {
+    /// Create a new search state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset the search state when a new file is loaded.
+    pub fn reset(&mut self) {
+        self.selected_input_index = 0;
+        self.selected_state_index = 0;
+        self.results = SearchResult::new();
+        self.has_searched = false;
+        // Keep dialog_open unchanged so user can continue searching
+    }
+
+    /// Clear search results and mark as not searched.
+    pub fn clear_results(&mut self) {
+        self.results = SearchResult::new();
+        self.has_searched = false;
+    }
+}
+
 /// Main application state and GUI logic.
 pub struct InputLogViewerApp {
     /// Current application state
@@ -149,6 +187,8 @@ pub struct InputLogViewerApp {
     filter_popup_open: bool,
     /// Frame input value for inline editing in controls
     frame_input_value: u64,
+    /// Search state for input search functionality
+    search: SearchState,
 }
 
 impl InputLogViewerApp {
@@ -164,6 +204,7 @@ impl InputLogViewerApp {
             filter: FilterState::new(),
             filter_popup_open: false,
             frame_input_value: 0,
+            search: SearchState::new(),
         }
     }
 
@@ -187,6 +228,8 @@ impl InputLogViewerApp {
                     let event_count = log.events.len();
                     // Initialize filter with all inputs visible
                     self.filter.initialize_from_log(&log);
+                    // Reset search state for new file
+                    self.search.reset();
                     self.log = Some(log);
                     self.loaded_file_path = Some(path.clone());
                     self.state = AppState::Ready;
@@ -273,8 +316,17 @@ impl InputLogViewerApp {
     ///
     /// Returns an action if a keyboard shortcut was triggered, None otherwise.
     /// Shortcuts only work when a file is loaded (controls_enabled).
-    fn handle_keyboard_shortcuts(&self, ctx: &egui::Context) -> Option<ControlAction> {
-        // Only process shortcuts when controls are enabled
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) -> Option<ControlAction> {
+        // Handle Ctrl+F to open search dialog (works when toolbar is enabled)
+        if self.state.toolbar_enabled() {
+            let open_search = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F));
+            if open_search {
+                self.search.dialog_open = true;
+                return None;
+            }
+        }
+
+        // Only process playback shortcuts when controls are enabled
         if !self.state.controls_enabled() {
             return None;
         }
@@ -357,7 +409,7 @@ impl InputLogViewerApp {
                 // Search button (enabled only when file is loaded)
                 ui.add_enabled_ui(toolbar_enabled, |ui| {
                     if ui.button("🔍 Search").clicked() {
-                        // TODO: Implement search dialog in Phase 3
+                        self.search.dialog_open = !self.search.dialog_open;
                     }
                 });
 
@@ -371,6 +423,11 @@ impl InputLogViewerApp {
         // Render filter popup panel if open
         if self.filter_popup_open && toolbar_enabled {
             self.render_filter_popup(ctx);
+        }
+
+        // Render search dialog if open
+        if self.search.dialog_open && toolbar_enabled {
+            self.render_search_dialog(ctx);
         }
     }
 
@@ -475,6 +532,234 @@ impl InputLogViewerApp {
 
         if should_close {
             self.filter_popup_open = false;
+        }
+    }
+
+    /// Render the search dialog window.
+    fn render_search_dialog(&mut self, ctx: &egui::Context) {
+        let mut should_close = false;
+        let mut seek_to_frame: Option<u64> = None;
+        let mut perform_search = false;
+
+        egui::Window::new("Search Input")
+            .id(egui::Id::new("search_dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(280.0)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
+            .show(ctx, |ui| {
+                // Close button
+                ui.horizontal(|ui| {
+                    ui.heading("Search Input");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("✕").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+                ui.separator();
+
+                if let Some(ref log) = self.log {
+                    // Input selector dropdown
+                    ui.horizontal(|ui| {
+                        ui.label("Input:");
+                        ui.add_space(10.0);
+                        let selected_name = if self.search.selected_input_index < log.mappings.len()
+                        {
+                            let mapping = &log.mappings[self.search.selected_input_index];
+                            if mapping.name.is_empty() {
+                                format!("Input {}", mapping.id)
+                            } else {
+                                mapping.name.clone()
+                            }
+                        } else {
+                            "Select input...".to_string()
+                        };
+
+                        egui::ComboBox::from_id_salt("search_input_combo")
+                            .selected_text(selected_name)
+                            .width(160.0)
+                            .show_ui(ui, |ui| {
+                                for (i, mapping) in log.mappings.iter().enumerate() {
+                                    let label = if mapping.name.is_empty() {
+                                        format!("Input {}", mapping.id)
+                                    } else {
+                                        mapping.name.clone()
+                                    };
+                                    if ui
+                                        .selectable_label(
+                                            self.search.selected_input_index == i,
+                                            &label,
+                                        )
+                                        .clicked()
+                                    {
+                                        self.search.selected_input_index = i;
+                                        // Clear previous results when selection changes
+                                        self.search.clear_results();
+                                    }
+                                }
+                            });
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Get the kind of the selected input to determine if state filter applies
+                    let selected_kind = if self.search.selected_input_index < log.mappings.len() {
+                        let mapping_id = log.mappings[self.search.selected_input_index].id;
+                        log.events
+                            .iter()
+                            .find(|e| e.id == mapping_id)
+                            .map(|e| e.kind)
+                            .unwrap_or(InputKind::Button)
+                    } else {
+                        InputKind::Button
+                    };
+
+                    // State selector dropdown (only for Button type)
+                    let is_button = selected_kind == InputKind::Button;
+                    ui.add_enabled_ui(is_button, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("State:");
+                            ui.add_space(10.0);
+                            let state_options = ["Any", "Pressed", "Released"];
+                            let selected_state = state_options
+                                .get(self.search.selected_state_index)
+                                .unwrap_or(&"Any");
+
+                            egui::ComboBox::from_id_salt("search_state_combo")
+                                .selected_text(*selected_state)
+                                .width(160.0)
+                                .show_ui(ui, |ui| {
+                                    for (i, state) in state_options.iter().enumerate() {
+                                        if ui
+                                            .selectable_label(
+                                                self.search.selected_state_index == i,
+                                                *state,
+                                            )
+                                            .clicked()
+                                        {
+                                            self.search.selected_state_index = i;
+                                            // Clear previous results when selection changes
+                                            self.search.clear_results();
+                                        }
+                                    }
+                                });
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Search button
+                    ui.horizontal(|ui| {
+                        if ui.button("Search").clicked() {
+                            perform_search = true;
+                        }
+                        if self.search.has_searched && ui.button("Clear").clicked() {
+                            self.search.clear_results();
+                        }
+                    });
+
+                    ui.separator();
+
+                    // Results section
+                    if self.search.has_searched {
+                        if self.search.results.is_empty() {
+                            ui.label("No matches found");
+                        } else {
+                            let count = self.search.results.count();
+                            let current = self.search.results.current_position().unwrap_or(0);
+                            ui.label(format!("Results: {} / {} matches", current, count));
+
+                            ui.add_space(4.0);
+
+                            // Navigation buttons
+                            ui.horizontal(|ui| {
+                                if ui.button("< Prev").clicked()
+                                    && let Some(frame) = self.search.results.prev()
+                                {
+                                    seek_to_frame = Some(frame);
+                                }
+                                if ui.button("Next >").clicked()
+                                    && let Some(frame) = self.search.results.next()
+                                {
+                                    seek_to_frame = Some(frame);
+                                }
+                            });
+
+                            // Show current match frame
+                            if let Some(frame) = self.search.results.current_frame() {
+                                ui.add_space(4.0);
+                                ui.label(format!("Current: Frame {}", frame));
+                            }
+                        }
+                    }
+                } else {
+                    ui.label("No file loaded");
+                }
+            });
+
+        if should_close {
+            self.search.dialog_open = false;
+            // Clear search results when closing dialog to remove highlights
+            self.search.clear_results();
+        }
+
+        // Perform search if requested
+        if perform_search {
+            self.perform_search();
+        }
+
+        // Seek to frame if navigation was used
+        if let Some(frame) = seek_to_frame {
+            let total_frames = self
+                .log
+                .as_ref()
+                .map(|l| l.metadata.frame_count)
+                .unwrap_or(0);
+            self.playback.set_frame(frame, total_frames);
+        }
+    }
+
+    /// Execute the search based on current search state.
+    fn perform_search(&mut self) {
+        if let Some(ref log) = self.log {
+            if self.search.selected_input_index >= log.mappings.len() {
+                return;
+            }
+
+            let mapping = &log.mappings[self.search.selected_input_index];
+            let input_id = mapping.id;
+
+            // Build the search query
+            let mut query = SearchQuery::with_input_id(input_id);
+
+            // Add button state filter if applicable
+            if self.search.selected_state_index > 0 {
+                let state = match self.search.selected_state_index {
+                    1 => Some(ButtonState::Pressed),
+                    2 => Some(ButtonState::Released),
+                    _ => None,
+                };
+                if let Some(s) = state {
+                    query = query.button_state(s);
+                }
+            }
+
+            // Execute the search
+            let matches = find_matches(log, &query);
+            self.search.results = SearchResult::from_matches(matches);
+            self.search.has_searched = true;
+
+            // Navigate to the first result closest to current frame
+            if !self.search.results.is_empty() {
+                self.search
+                    .results
+                    .set_closest_to_frame(self.playback.current_frame);
+                if let Some(frame) = self.search.results.current_frame() {
+                    let total_frames = log.metadata.frame_count;
+                    self.playback.set_frame(frame, total_frames);
+                }
+            }
         }
     }
 
@@ -689,8 +974,11 @@ impl InputLogViewerApp {
             ui.separator();
             ui.add_space(5.0);
 
-            // Render the timeline using TimelineRenderer with filter
-            let renderer = TimelineRenderer::new(log, &self.timeline_config, &self.filter);
+            // Render the timeline using TimelineRenderer with filter and search results
+            let mut renderer = TimelineRenderer::new(log, &self.timeline_config, &self.filter);
+            if self.search.has_searched && !self.search.results.is_empty() {
+                renderer = renderer.with_search_results(&self.search.results);
+            }
             renderer.render(ui);
         }
     }

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use crate::core::filter::FilterState;
 use crate::core::log::{ButtonState, InputEvent, InputKind, InputLog, InputMapping};
+use crate::core::search::SearchResult;
 
 /// Default number of visible frames in the timeline.
 pub const DEFAULT_VISIBLE_FRAMES: u64 = 100;
@@ -52,6 +53,8 @@ pub struct TimelineRenderer<'a> {
     config: &'a TimelineConfig,
     /// Filter state for input visibility
     filter: &'a FilterState,
+    /// Search results for highlighting (optional)
+    search_results: Option<&'a SearchResult>,
     /// Visible mappings based on current filter
     visible_mappings: Vec<&'a InputMapping>,
     /// Map from input ID to row index (among visible rows)
@@ -94,10 +97,17 @@ impl<'a> TimelineRenderer<'a> {
             log,
             config,
             filter,
+            search_results: None,
             visible_mappings,
             id_to_row,
             id_to_mapping,
         }
+    }
+
+    /// Set search results for highlighting matching frames.
+    pub fn with_search_results(mut self, results: &'a SearchResult) -> Self {
+        self.search_results = Some(results);
+        self
     }
 
     /// Get the color for an input ID, or a default color if not mapped.
@@ -144,6 +154,7 @@ impl<'a> TimelineRenderer<'a> {
         self.draw_frame_header(&painter, rect, timeline_rect);
         self.draw_row_labels(&painter, rect, num_rows);
         self.draw_grid(&painter, rect, timeline_rect, num_rows);
+        self.draw_search_highlights(&painter, rect, timeline_rect);
         self.draw_events(&painter, timeline_rect);
         self.draw_current_frame_indicator(&painter, rect, timeline_rect);
     }
@@ -518,6 +529,66 @@ impl<'a> TimelineRenderer<'a> {
             dot_radius,
             color.gamma_multiply(intensity),
         );
+    }
+
+    /// Draw highlights for search result frames.
+    fn draw_search_highlights(&self, painter: &Painter, rect: Rect, timeline_rect: Rect) {
+        let results = match self.search_results {
+            Some(r) if !r.is_empty() => r,
+            _ => return,
+        };
+
+        let start_frame = self.config.scroll_offset;
+        let end_frame = start_frame + self.config.visible_frames;
+        let frame_width = timeline_rect.width() / self.config.visible_frames as f32;
+
+        // Draw highlight for each matching frame in the visible range
+        for &frame in &results.matches {
+            if frame < start_frame || frame >= end_frame {
+                continue;
+            }
+
+            let x = timeline_rect.left() + ((frame - start_frame) as f32 * frame_width);
+
+            // Determine if this is the current result
+            let is_current = results.current_frame() == Some(frame);
+
+            // Use different colors for current vs other matches
+            let (fill_color, stroke_color) = if is_current {
+                (
+                    Color32::from_rgba_unmultiplied(100, 200, 255, 40),
+                    Color32::from_rgba_unmultiplied(100, 200, 255, 150),
+                )
+            } else {
+                (
+                    Color32::from_rgba_unmultiplied(255, 255, 100, 25),
+                    Color32::from_rgba_unmultiplied(255, 255, 100, 80),
+                )
+            };
+
+            // Draw a vertical highlight bar for the frame column
+            let highlight_rect = Rect::from_min_size(
+                Pos2::new(x, rect.top() + HEADER_HEIGHT),
+                egui::vec2(frame_width, rect.height() - HEADER_HEIGHT),
+            );
+            painter.rect_filled(highlight_rect, 0.0, fill_color);
+            painter.rect_stroke(
+                highlight_rect,
+                0.0,
+                Stroke::new(1.0, stroke_color),
+                egui::StrokeKind::Inside,
+            );
+
+            // Draw a small marker at the top of the header for current result
+            if is_current {
+                let marker_width = 6.0;
+                let marker_rect = Rect::from_min_size(
+                    Pos2::new(x + frame_width / 2.0 - marker_width / 2.0, rect.top() + 2.0),
+                    egui::vec2(marker_width, 4.0),
+                );
+                painter.rect_filled(marker_rect, 2.0, Color32::from_rgb(100, 200, 255));
+            }
+        }
     }
 
     /// Draw a vertical highlight line at the current frame position.
