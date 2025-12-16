@@ -46,7 +46,6 @@ pub struct PlaybackState {
     pub range_end: Option<u64>,
 
     /// Last time the frame was advanced (for timing control).
-    #[allow(dead_code)] // Will be used when implementing playback timing
     last_update: Instant,
 }
 
@@ -79,7 +78,6 @@ impl PlaybackState {
     ///
     /// # Returns
     /// `true` if enough time has passed to advance the frame, `false` otherwise.
-    #[allow(dead_code)] // Will be used when implementing playback loop in update()
     pub fn should_advance(&self, target_fps: u32) -> bool {
         if target_fps == 0 || self.speed <= 0.0 {
             return false;
@@ -90,7 +88,6 @@ impl PlaybackState {
     }
 
     /// Mark that a frame advance has occurred, updating the timestamp.
-    #[allow(dead_code)] // Will be used when implementing playback loop
     pub fn mark_advanced(&mut self) {
         self.last_update = Instant::now();
     }
@@ -117,7 +114,6 @@ impl PlaybackState {
     /// # Arguments
     /// * `frame` - The desired frame number.
     /// * `total_frames` - The total number of frames in the log.
-    #[allow(dead_code)] // Will be used when implementing frame navigation
     pub fn set_frame(&mut self, frame: u64, total_frames: u64) {
         let max_frame = total_frames.saturating_sub(1);
         self.current_frame = frame.min(max_frame);
@@ -130,7 +126,6 @@ impl PlaybackState {
     ///
     /// # Returns
     /// `true` if playback should continue, `false` if end was reached and loop is disabled.
-    #[allow(dead_code)] // Will be used when implementing playback
     pub fn advance(&mut self, total_frames: u64) -> bool {
         let end_frame = self.effective_end(total_frames);
 
@@ -153,7 +148,6 @@ impl PlaybackState {
     ///
     /// # Arguments
     /// * `total_frames` - The total number of frames in the log.
-    #[allow(dead_code)] // Will be used when implementing frame navigation
     pub fn previous(&mut self, total_frames: u64) {
         let start_frame = self.effective_start();
 
@@ -167,7 +161,6 @@ impl PlaybackState {
     }
 
     /// Go to the start frame.
-    #[allow(dead_code)] // Will be used when implementing frame navigation
     pub fn go_to_start(&mut self) {
         self.current_frame = self.effective_start();
     }
@@ -176,7 +169,6 @@ impl PlaybackState {
     ///
     /// # Arguments
     /// * `total_frames` - The total number of frames in the log.
-    #[allow(dead_code)] // Will be used when implementing frame navigation
     pub fn go_to_end(&mut self, total_frames: u64) {
         self.current_frame = self.effective_end(total_frames);
     }
@@ -208,7 +200,6 @@ impl PlaybackState {
     }
 
     /// Reset the timing for frame advance (call when starting playback).
-    #[allow(dead_code)] // Will be used when implementing play/pause
     pub fn reset_timing(&mut self) {
         self.last_update = Instant::now();
     }

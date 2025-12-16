@@ -4,6 +4,7 @@
 //! including the main application window, toolbar, timeline, and controls.
 
 mod app;
+mod controls;
 mod timeline;
 
 pub use app::InputLogViewerApp;
