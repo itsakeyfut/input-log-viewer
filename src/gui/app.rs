@@ -147,6 +147,8 @@ pub struct InputLogViewerApp {
     filter: FilterState,
     /// Whether the filter popup is currently open
     filter_popup_open: bool,
+    /// Frame input value for inline editing in controls
+    frame_input_value: u64,
 }
 
 impl InputLogViewerApp {
@@ -161,6 +163,7 @@ impl InputLogViewerApp {
             playback: PlaybackState::new(),
             filter: FilterState::new(),
             filter_popup_open: false,
+            frame_input_value: 0,
         }
     }
 
@@ -245,12 +248,13 @@ impl eframe::App for InputLogViewerApp {
             ctx.request_repaint();
         }
 
-        // Handle keyboard shortcuts
         let total_frames = self
             .log
             .as_ref()
             .map(|l| l.metadata.frame_count)
             .unwrap_or(0);
+
+        // Handle keyboard shortcuts
         if let Some(action) = self.handle_keyboard_shortcuts(ctx) {
             self.handle_control_action(action, total_frames);
         }
@@ -535,18 +539,22 @@ impl InputLogViewerApp {
 
         // Capture action from controls renderer
         let mut action: Option<ControlAction> = None;
+        let mut frame_input = self.frame_input_value;
 
         egui::TopBottomPanel::bottom("controls")
             .min_height(80.0)
             .show(ctx, |ui| {
-                let renderer = ControlsRenderer::new(
+                let mut renderer = ControlsRenderer::new(
                     controls_enabled,
                     is_playing,
                     &self.playback,
                     total_frames,
+                    &mut frame_input,
                 );
                 action = renderer.render(ui);
             });
+
+        self.frame_input_value = frame_input;
 
         // Handle control actions
         if let Some(action) = action {

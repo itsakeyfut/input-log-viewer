@@ -40,6 +40,8 @@ pub struct ControlsRenderer<'a> {
     at_start: bool,
     /// Whether the current frame is at the end boundary
     at_end: bool,
+    /// Mutable frame value for inline editing
+    frame_input: &'a mut u64,
 }
 
 impl<'a> ControlsRenderer<'a> {
@@ -49,6 +51,7 @@ impl<'a> ControlsRenderer<'a> {
         is_playing: bool,
         playback: &'a PlaybackState,
         total_frames: u64,
+        frame_input: &'a mut u64,
     ) -> Self {
         // Pre-compute boundary states for button disabling
         let at_start = playback.is_at_start();
@@ -61,11 +64,12 @@ impl<'a> ControlsRenderer<'a> {
             total_frames,
             at_start,
             at_end,
+            frame_input,
         }
     }
 
     /// Render the controls and return any triggered action.
-    pub fn render(&self, ui: &mut egui::Ui) -> Option<ControlAction> {
+    pub fn render(&mut self, ui: &mut egui::Ui) -> Option<ControlAction> {
         let mut action: Option<ControlAction> = None;
 
         ui.vertical(|ui| {
@@ -73,7 +77,7 @@ impl<'a> ControlsRenderer<'a> {
             ui.horizontal(|ui| {
                 action = self.render_navigation_buttons(ui).or(action);
                 ui.separator();
-                self.render_frame_counter(ui);
+                action = self.render_frame_counter(ui).or(action);
                 ui.separator();
                 action = self.render_speed_control(ui).or(action);
             });
@@ -157,12 +161,32 @@ impl<'a> ControlsRenderer<'a> {
         action
     }
 
-    /// Render the frame counter display.
-    fn render_frame_counter(&self, ui: &mut egui::Ui) {
-        ui.label(format!(
-            "Frame: {} / {}",
-            self.playback.current_frame, self.total_frames
-        ));
+    /// Render the frame counter with editable input.
+    fn render_frame_counter(&mut self, ui: &mut egui::Ui) -> Option<ControlAction> {
+        let mut action: Option<ControlAction> = None;
+        let max_frame = self.total_frames.saturating_sub(1);
+
+        ui.add_enabled_ui(self.enabled, |ui| {
+            ui.label("Frame:");
+
+            // Sync frame_input with current playback frame
+            *self.frame_input = self.playback.current_frame;
+
+            let response = ui.add(
+                egui::DragValue::new(self.frame_input)
+                    .range(0..=max_frame)
+                    .speed(1.0),
+            );
+
+            // Trigger seek when value changes (drag or direct input)
+            if response.changed() {
+                action = Some(ControlAction::SeekToFrame(*self.frame_input));
+            }
+
+            ui.label(format!("/ {}", self.total_frames.saturating_sub(1)));
+        });
+
+        action
     }
 
     /// Render speed control and return any triggered action.
