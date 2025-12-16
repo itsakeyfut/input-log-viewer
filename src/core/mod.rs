@@ -2,3 +2,4 @@
 
 pub mod log;
 pub mod parser;
+pub mod playback;

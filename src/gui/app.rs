@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use crate::core::log::InputLog;
 use crate::core::parser;
+use crate::core::playback::{PlaybackState, SPEED_OPTIONS};
 
 use super::timeline::{TimelineConfig, TimelineRenderer};
 
@@ -139,6 +140,8 @@ pub struct InputLogViewerApp {
     status_message: Option<StatusMessage>,
     /// Timeline rendering configuration
     timeline_config: TimelineConfig,
+    /// Playback state for frame position and timing
+    playback: PlaybackState,
 }
 
 impl InputLogViewerApp {
@@ -150,6 +153,7 @@ impl InputLogViewerApp {
             loaded_file_path: None,
             status_message: None,
             timeline_config: TimelineConfig::default(),
+            playback: PlaybackState::new(),
         }
     }
 
@@ -214,6 +218,9 @@ impl InputLogViewerApp {
 
 impl eframe::App for InputLogViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Sync playback current_frame with timeline config for rendering
+        self.timeline_config.current_frame = self.playback.current_frame;
+
         self.render_toolbar(ctx);
         self.render_controls(ctx);
         self.render_timeline(ctx);
@@ -367,7 +374,7 @@ impl InputLogViewerApp {
                             .unwrap_or(0);
                         ui.label(format!(
                             "Frame: {} / {}",
-                            self.timeline_config.current_frame, total_frames
+                            self.playback.current_frame, total_frames
                         ));
 
                         ui.separator();
@@ -375,16 +382,27 @@ impl InputLogViewerApp {
                         // Speed control (disabled when no file or loading)
                         ui.add_enabled_ui(controls_enabled, |ui| {
                             ui.label("Speed:");
+                            let current_speed = self.playback.speed;
+                            let mut selected_speed = current_speed;
                             egui::ComboBox::from_id_salt("speed_combo")
-                                .selected_text("1.0x")
+                                .selected_text(format!("{:.2}x", current_speed))
                                 .width(60.0)
                                 .show_ui(ui, |ui| {
-                                    let _ = ui.selectable_label(false, "0.25x");
-                                    let _ = ui.selectable_label(false, "0.5x");
-                                    let _ = ui.selectable_label(true, "1.0x");
-                                    let _ = ui.selectable_label(false, "2.0x");
-                                    let _ = ui.selectable_label(false, "4.0x");
+                                    for &speed in SPEED_OPTIONS {
+                                        if ui
+                                            .selectable_label(
+                                                (current_speed - speed).abs() < 0.01,
+                                                format!("{:.2}x", speed),
+                                            )
+                                            .clicked()
+                                        {
+                                            selected_speed = speed;
+                                        }
+                                    }
                                 });
+                            if (selected_speed - current_speed).abs() > 0.01 {
+                                self.playback.set_speed(selected_speed);
+                            }
                         });
                     });
 
