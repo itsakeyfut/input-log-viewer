@@ -236,6 +236,16 @@ impl eframe::App for InputLogViewerApp {
             ctx.request_repaint();
         }
 
+        // Handle keyboard shortcuts
+        let total_frames = self
+            .log
+            .as_ref()
+            .map(|l| l.metadata.frame_count)
+            .unwrap_or(0);
+        if let Some(action) = self.handle_keyboard_shortcuts(ctx) {
+            self.handle_control_action(action, total_frames);
+        }
+
         // Sync playback current_frame with timeline config for rendering
         self.timeline_config.current_frame = self.playback.current_frame;
 
@@ -246,6 +256,46 @@ impl eframe::App for InputLogViewerApp {
 }
 
 impl InputLogViewerApp {
+    /// Handle keyboard shortcuts for playback control.
+    ///
+    /// Returns an action if a keyboard shortcut was triggered, None otherwise.
+    /// Shortcuts only work when a file is loaded (controls_enabled).
+    fn handle_keyboard_shortcuts(&self, ctx: &egui::Context) -> Option<ControlAction> {
+        // Only process shortcuts when controls are enabled
+        if !self.state.controls_enabled() {
+            return None;
+        }
+
+        ctx.input(|i| {
+            // Space: Toggle play/pause
+            if i.key_pressed(egui::Key::Space) {
+                return Some(ControlAction::TogglePlayPause);
+            }
+
+            // Left Arrow: Previous frame
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                return Some(ControlAction::PreviousFrame);
+            }
+
+            // Right Arrow: Next frame
+            if i.key_pressed(egui::Key::ArrowRight) {
+                return Some(ControlAction::NextFrame);
+            }
+
+            // Home: Jump to first frame
+            if i.key_pressed(egui::Key::Home) {
+                return Some(ControlAction::GoToStart);
+            }
+
+            // End: Jump to last frame
+            if i.key_pressed(egui::Key::End) {
+                return Some(ControlAction::GoToEnd);
+            }
+
+            None
+        })
+    }
+
     /// Render the top toolbar section.
     ///
     /// Contains file loading, filter options, and search functionality.
