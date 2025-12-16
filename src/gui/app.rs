@@ -6,6 +6,7 @@
 use eframe::egui;
 use std::path::PathBuf;
 
+use crate::core::filter::FilterState;
 use crate::core::log::InputLog;
 use crate::core::parser;
 use crate::core::playback::PlaybackState;
@@ -142,6 +143,10 @@ pub struct InputLogViewerApp {
     timeline_config: TimelineConfig,
     /// Playback state for frame position and timing
     playback: PlaybackState,
+    /// Filter state for input visibility
+    filter: FilterState,
+    /// Whether the filter popup is currently open
+    filter_popup_open: bool,
 }
 
 impl InputLogViewerApp {
@@ -154,6 +159,8 @@ impl InputLogViewerApp {
             status_message: None,
             timeline_config: TimelineConfig::default(),
             playback: PlaybackState::new(),
+            filter: FilterState::new(),
+            filter_popup_open: false,
         }
     }
 
@@ -175,6 +182,8 @@ impl InputLogViewerApp {
                 Ok(log) => {
                     let frame_count = log.metadata.frame_count;
                     let event_count = log.events.len();
+                    // Initialize filter with all inputs visible
+                    self.filter.initialize_from_log(&log);
                     self.log = Some(log);
                     self.loaded_file_path = Some(path.clone());
                     self.state = AppState::Ready;
@@ -317,16 +326,26 @@ impl InputLogViewerApp {
 
                 ui.separator();
 
-                // Filter dropdown (enabled only when file is loaded)
+                // Filter dropdown button (enabled only when file is loaded)
                 ui.add_enabled_ui(toolbar_enabled, |ui| {
-                    ui.label("Filter:");
-                    egui::ComboBox::from_id_salt("filter_combo")
-                        .selected_text("All Inputs")
-                        .show_ui(ui, |ui| {
-                            let _ = ui.selectable_label(true, "All Inputs");
-                            let _ = ui.selectable_label(false, "Buttons Only");
-                            let _ = ui.selectable_label(false, "Axes Only");
-                        });
+                    let filter_button_text = if self.filter_popup_open {
+                        "Filter ▲"
+                    } else {
+                        "Filter ▼"
+                    };
+                    let filter_response = ui.button(filter_button_text);
+                    if filter_response.clicked() {
+                        self.filter_popup_open = !self.filter_popup_open;
+                    }
+
+                    // Show filter count indicator
+                    if let Some(ref log) = self.log {
+                        let visible_count = self.filter.visible_ids.len();
+                        let total_count = log.mappings.len();
+                        if visible_count < total_count {
+                            ui.label(format!("({}/{})", visible_count, total_count));
+                        }
+                    }
                 });
 
                 ui.separator();
@@ -344,6 +363,95 @@ impl InputLogViewerApp {
                 });
             });
         });
+
+        // Render filter popup panel if open
+        if self.filter_popup_open && toolbar_enabled {
+            self.render_filter_popup(ctx);
+        }
+    }
+
+    /// Render the filter popup panel.
+    fn render_filter_popup(&mut self, ctx: &egui::Context) {
+        let mut should_close = false;
+
+        egui::Window::new("Input Filter")
+            .id(egui::Id::new("filter_popup"))
+            .collapsible(false)
+            .resizable(true)
+            .default_width(220.0)
+            .anchor(egui::Align2::LEFT_TOP, egui::vec2(160.0, 40.0))
+            .show(ctx, |ui| {
+                // Close button
+                ui.horizontal(|ui| {
+                    ui.heading("Filter Inputs");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("✕").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+                ui.separator();
+
+                if let Some(ref log) = self.log {
+                    // Input type filters
+                    ui.label("Input Types:");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.filter.show_button, "Buttons");
+                        ui.checkbox(&mut self.filter.show_axis1d, "Axis1D");
+                        ui.checkbox(&mut self.filter.show_axis2d, "Axis2D");
+                    });
+                    ui.separator();
+
+                    // Individual input checkboxes
+                    ui.label("Inputs:");
+                    egui::ScrollArea::vertical()
+                        .max_height(250.0)
+                        .show(ui, |ui| {
+                            for mapping in &log.mappings {
+                                let mut is_visible = self.filter.visible_ids.contains(&mapping.id);
+                                let label = if mapping.name.is_empty() {
+                                    format!("Input {}", mapping.id)
+                                } else {
+                                    mapping.name.clone()
+                                };
+
+                                // Show color indicator if available
+                                ui.horizontal(|ui| {
+                                    if let Some(color) = mapping.color {
+                                        let color32 =
+                                            egui::Color32::from_rgb(color[0], color[1], color[2]);
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(12.0, 12.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().rect_filled(rect, 2.0, color32);
+                                    }
+                                    if ui.checkbox(&mut is_visible, &label).changed() {
+                                        self.filter.set_id_visible(mapping.id, is_visible);
+                                    }
+                                });
+                            }
+                        });
+
+                    ui.separator();
+
+                    // Select All / Deselect All buttons
+                    ui.horizontal(|ui| {
+                        if ui.button("All").clicked() {
+                            self.filter.select_all(&log.mappings);
+                        }
+                        if ui.button("None").clicked() {
+                            self.filter.deselect_all();
+                        }
+                    });
+                } else {
+                    ui.label("No file loaded");
+                }
+            });
+
+        if should_close {
+            self.filter_popup_open = false;
+        }
     }
 
     /// Render the status message if one is active.
@@ -553,8 +661,8 @@ impl InputLogViewerApp {
             ui.separator();
             ui.add_space(5.0);
 
-            // Render the timeline using TimelineRenderer
-            let renderer = TimelineRenderer::new(log, &self.timeline_config);
+            // Render the timeline using TimelineRenderer with filter
+            let renderer = TimelineRenderer::new(log, &self.timeline_config, &self.filter);
             renderer.render(ui);
         }
     }
