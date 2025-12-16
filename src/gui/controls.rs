@@ -198,16 +198,29 @@ impl<'a> ControlsRenderer<'a> {
         let mut action: Option<ControlAction> = None;
 
         ui.add_enabled_ui(self.enabled, |ui| {
-            let max_frame = self.total_frames.saturating_sub(1) as f32;
+            let max_frame = self.total_frames.saturating_sub(1);
+            let max_frame_f32 = max_frame as f32;
             let mut frame = self.playback.current_frame as f32;
-            let response = ui.add(
-                egui::Slider::new(&mut frame, 0.0..=max_frame.max(1.0))
-                    .show_value(false)
-                    .text(""),
-            );
-            if response.changed() {
-                action = Some(ControlAction::SeekToFrame(frame as u64));
-            }
+
+            // Render the slider
+            ui.vertical(|ui| {
+                let response = ui.add(
+                    egui::Slider::new(&mut frame, 0.0..=max_frame_f32.max(1.0))
+                        .show_value(false)
+                        .text(""),
+                );
+                if response.changed() {
+                    action = Some(ControlAction::SeekToFrame(frame as u64));
+                }
+
+                // Frame range labels below the slider
+                ui.horizontal(|ui| {
+                    ui.label("0");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(format!("{}", max_frame));
+                    });
+                });
+            });
         });
 
         action
