@@ -8,8 +8,9 @@ use std::path::PathBuf;
 
 use crate::core::log::InputLog;
 use crate::core::parser;
-use crate::core::playback::{PlaybackState, SPEED_OPTIONS};
+use crate::core::playback::PlaybackState;
 
+use super::controls::{ControlAction, ControlsRenderer};
 use super::timeline::{TimelineConfig, TimelineRenderer};
 
 /// Error information for the error state.
@@ -52,7 +53,6 @@ pub enum AppState {
     /// A file has been successfully loaded and is ready for viewing
     Ready,
     /// Playback is in progress
-    #[allow(dead_code)] // Will be used when implementing playback
     Playing,
     /// An error occurred
     Error(AppError),
@@ -218,6 +218,24 @@ impl InputLogViewerApp {
 
 impl eframe::App for InputLogViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle playback advancement when playing
+        if self.state.is_playing() {
+            if let Some(ref log) = self.log {
+                let target_fps = log.metadata.target_fps;
+                let total_frames = log.metadata.frame_count;
+
+                if self.playback.should_advance(target_fps) {
+                    let should_continue = self.playback.advance(total_frames);
+                    if !should_continue {
+                        // Playback ended (loop disabled and reached end)
+                        self.state = AppState::Ready;
+                    }
+                }
+            }
+            // Keep requesting repaints while playing
+            ctx.request_repaint();
+        }
+
         // Sync playback current_frame with timeline config for rendering
         self.timeline_config.current_frame = self.playback.current_frame;
 
@@ -331,103 +349,65 @@ impl InputLogViewerApp {
     fn render_controls(&mut self, ctx: &egui::Context) {
         let controls_enabled = self.state.controls_enabled();
         let is_playing = self.state.is_playing();
+        let total_frames = self
+            .log
+            .as_ref()
+            .map(|l| l.metadata.frame_count)
+            .unwrap_or(0);
+
+        // Capture action from controls renderer
+        let mut action: Option<ControlAction> = None;
 
         egui::TopBottomPanel::bottom("controls")
             .min_height(80.0)
             .show(ctx, |ui| {
-                ui.vertical(|ui| {
-                    // Playback controls row
-                    ui.horizontal(|ui| {
-                        // Navigation buttons (disabled when no file or loading)
-                        ui.add_enabled_ui(controls_enabled, |ui| {
-                            if ui.button("⏮").on_hover_text("Go to start").clicked() {
-                                // TODO: Implement in Phase 2
-                            }
-                            if ui.button("⏪").on_hover_text("Previous frame").clicked() {
-                                // TODO: Implement in Phase 2
-                            }
-                            // Show pause icon when playing, play icon otherwise
-                            let play_btn_text = if is_playing { "⏸" } else { "▶" };
-                            let play_btn_hover = if is_playing { "Pause" } else { "Play" };
-                            if ui
-                                .button(play_btn_text)
-                                .on_hover_text(play_btn_hover)
-                                .clicked()
-                            {
-                                // TODO: Implement in Phase 2
-                            }
-                            if ui.button("⏩").on_hover_text("Next frame").clicked() {
-                                // TODO: Implement in Phase 2
-                            }
-                            if ui.button("⏭").on_hover_text("Go to end").clicked() {
-                                // TODO: Implement in Phase 2
-                            }
-                        });
-
-                        ui.separator();
-
-                        // Frame counter
-                        let total_frames = self
-                            .log
-                            .as_ref()
-                            .map(|l| l.metadata.frame_count)
-                            .unwrap_or(0);
-                        ui.label(format!(
-                            "Frame: {} / {}",
-                            self.playback.current_frame, total_frames
-                        ));
-
-                        ui.separator();
-
-                        // Speed control (disabled when no file or loading)
-                        ui.add_enabled_ui(controls_enabled, |ui| {
-                            ui.label("Speed:");
-                            let current_speed = self.playback.speed;
-                            let mut selected_speed = current_speed;
-                            egui::ComboBox::from_id_salt("speed_combo")
-                                .selected_text(format!("{:.2}x", current_speed))
-                                .width(60.0)
-                                .show_ui(ui, |ui| {
-                                    for &speed in SPEED_OPTIONS {
-                                        if ui
-                                            .selectable_label(
-                                                (current_speed - speed).abs() < 0.01,
-                                                format!("{:.2}x", speed),
-                                            )
-                                            .clicked()
-                                        {
-                                            selected_speed = speed;
-                                        }
-                                    }
-                                });
-                            if (selected_speed - current_speed).abs() > 0.01 {
-                                self.playback.set_speed(selected_speed);
-                            }
-                        });
-                    });
-
-                    ui.add_space(4.0);
-
-                    // Timeline scrubber row (disabled when no file or loading)
-                    ui.horizontal(|ui| {
-                        ui.add_enabled_ui(controls_enabled, |ui| {
-                            let mut frame: f32 = 0.0;
-                            ui.add(
-                                egui::Slider::new(&mut frame, 0.0..=100.0)
-                                    .show_value(false)
-                                    .text(""),
-                            );
-                        });
-                    });
-
-                    // Bookmarks row
-                    ui.horizontal(|ui| {
-                        ui.label("Bookmarks:");
-                        ui.label("(none)");
-                        // TODO: Display bookmarks in Phase 3
-                    });
-                });
+                let renderer = ControlsRenderer::new(
+                    controls_enabled,
+                    is_playing,
+                    &self.playback,
+                    total_frames,
+                );
+                action = renderer.render(ui);
             });
+
+        // Handle control actions
+        if let Some(action) = action {
+            self.handle_control_action(action, total_frames);
+        }
+    }
+
+    /// Handle a control action triggered by user interaction.
+    fn handle_control_action(&mut self, action: ControlAction, total_frames: u64) {
+        match action {
+            ControlAction::TogglePlayPause => {
+                if self.state.is_playing() {
+                    // Switch to Ready (pause)
+                    self.state = AppState::Ready;
+                } else if self.state == AppState::Ready {
+                    // Switch to Playing (play)
+                    self.playback.reset_timing();
+                    self.state = AppState::Playing;
+                }
+            }
+            ControlAction::GoToStart => {
+                self.playback.go_to_start();
+            }
+            ControlAction::PreviousFrame => {
+                self.playback.previous(total_frames);
+            }
+            ControlAction::NextFrame => {
+                let _ = self.playback.advance(total_frames);
+            }
+            ControlAction::GoToEnd => {
+                self.playback.go_to_end(total_frames);
+            }
+            ControlAction::SetSpeed(speed) => {
+                self.playback.set_speed(speed);
+            }
+            ControlAction::SeekToFrame(frame) => {
+                self.playback.set_frame(frame, total_frames);
+            }
+        }
     }
 
     /// Render the center timeline section.
