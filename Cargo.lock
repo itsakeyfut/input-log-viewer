@@ -1205,6 +1205,7 @@ dependencies = [
 name = "input-log-viewer"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "eframe",
  "rfd",
  "serde",

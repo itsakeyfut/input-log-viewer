@@ -1,15 +1,22 @@
-//! JSON parser for input log files (.ilj format).
+//! Parser for input log files (.ilj and .ilb formats).
 //!
-//! This module provides functionality to parse JSON-formatted input log files
-//! into the internal `InputLog` structure.
+//! This module provides functionality to parse both JSON-formatted (.ilj) and
+//! binary-formatted (.ilb) input log files into the internal `InputLog` structure.
 
 // Allow dead code for Phase 1 - these types will be used in later phases
 #![allow(dead_code)]
 
+use bytemuck::{Pod, Zeroable};
 use serde::Deserialize;
 use thiserror::Error;
 
 use super::log::{ButtonState, InputEvent, InputKind, InputLog, InputMapping, LogMetadata};
+
+/// Expected magic number for binary files: "ILOG"
+const BINARY_MAGIC: [u8; 4] = *b"ILOG";
+
+/// Currently supported binary format version
+const BINARY_VERSION: u32 = 1;
 
 /// Errors that can occur during input log parsing.
 #[derive(Debug, Error)]
@@ -37,6 +44,27 @@ pub enum ParseError {
     /// Unsupported format version
     #[error("Unsupported format version {version}: expected version 1")]
     UnsupportedVersion { version: u32 },
+
+    /// Invalid magic number in binary file
+    #[error("Invalid magic number: expected 'ILOG', found '{found}'")]
+    InvalidMagic { found: String },
+
+    /// Binary file too small to contain header
+    #[error("Binary file too small: expected at least {expected} bytes, found {found}")]
+    FileTooSmall { expected: usize, found: usize },
+
+    /// Binary file has invalid event data
+    #[error("Invalid binary event at index {index}: {reason}")]
+    InvalidBinaryEvent { index: usize, reason: String },
+
+    /// Event count mismatch between header and actual data
+    #[error(
+        "Event count mismatch: header declares {header_count} events, but file contains {actual_count}"
+    )]
+    EventCountMismatch {
+        header_count: u64,
+        actual_count: usize,
+    },
 }
 
 // ============================================================================
@@ -82,6 +110,114 @@ struct JsonEvent {
     #[serde(default)]
     state: Option<String>,
     value: [f32; 2],
+}
+
+// ============================================================================
+// Binary format structures
+// ============================================================================
+
+/// Binary file header (32 bytes).
+///
+/// The header is stored at the beginning of every .ilb file and contains
+/// metadata about the log file.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BinaryHeader {
+    /// Magic number identifying the file format: "ILOG"
+    pub magic: [u8; 4],
+    /// Format version number (currently 1)
+    pub version: u32,
+    /// Reserved flags (currently unused, must be 0)
+    pub flags: u32,
+    /// Target frames per second of the original game
+    pub target_fps: u32,
+    /// Total number of frames in the log
+    pub frame_count: u64,
+    /// Total number of events in the file
+    pub event_count: u64,
+}
+
+impl BinaryHeader {
+    /// Size of the header in bytes.
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    /// Validate the header and return Ok if valid.
+    pub fn validate(&self) -> Result<(), ParseError> {
+        // Check magic number
+        if self.magic != BINARY_MAGIC {
+            let found = String::from_utf8_lossy(&self.magic).to_string();
+            return Err(ParseError::InvalidMagic { found });
+        }
+
+        // Check version
+        if self.version != BINARY_VERSION {
+            return Err(ParseError::UnsupportedVersion {
+                version: self.version,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Binary event structure (24 bytes).
+///
+/// Each event in a binary file is represented by this fixed-size structure.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BinaryEvent {
+    /// Frame number when this event occurred
+    pub frame: u64,
+    /// Input identifier
+    pub id: u32,
+    /// Input kind (0=Button, 1=Axis1D, 2=Axis2D)
+    pub kind: u8,
+    /// Button state (0=Released, 1=Pressed, 2=Held)
+    pub state: u8,
+    /// Padding for alignment
+    pub _padding: [u8; 2],
+    /// Input values (1D uses index 0, 2D uses both)
+    pub value: [f32; 2],
+}
+
+impl BinaryEvent {
+    /// Size of a single event in bytes.
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    /// Convert the binary event to an `InputEvent`.
+    pub fn to_input_event(self, index: usize) -> Result<InputEvent, ParseError> {
+        let kind = match self.kind {
+            0 => InputKind::Button,
+            1 => InputKind::Axis1D,
+            2 => InputKind::Axis2D,
+            _ => {
+                return Err(ParseError::InvalidBinaryEvent {
+                    index,
+                    reason: format!("invalid kind value: {}", self.kind),
+                });
+            }
+        };
+
+        let state = match self.state {
+            0 => ButtonState::Released,
+            1 => ButtonState::Pressed,
+            2 => ButtonState::Held,
+            _ => {
+                return Err(ParseError::InvalidBinaryEvent {
+                    index,
+                    reason: format!("invalid state value: {}", self.state),
+                });
+            }
+        };
+
+        Ok(InputEvent {
+            frame: self.frame,
+            id: self.id,
+            kind,
+            state,
+            value: self.value,
+        })
+    }
 }
 
 // ============================================================================
@@ -236,6 +372,104 @@ fn parse_button_state(s: &str) -> Result<ButtonState, ParseError> {
             expected: "Released, Pressed, Held",
         }),
     }
+}
+
+// ============================================================================
+// Binary parser implementation
+// ============================================================================
+
+/// Parse a binary byte slice into an `InputLog`.
+///
+/// # Arguments
+/// * `data` - The raw bytes of the .ilb file
+///
+/// # Returns
+/// * `Ok(InputLog)` - Successfully parsed input log
+/// * `Err(ParseError)` - Parsing failed with a descriptive error
+///
+/// # Binary Format
+/// The binary format consists of:
+/// - A 32-byte header (BinaryHeader)
+/// - Followed by N events (BinaryEvent), each 24 bytes
+///
+/// # Example
+/// ```ignore
+/// let data = std::fs::read("log.ilb")?;
+/// let log = parse_binary(&data)?;
+/// ```
+pub fn parse_binary(data: &[u8]) -> Result<InputLog, ParseError> {
+    // Check minimum size for header
+    if data.len() < BinaryHeader::SIZE {
+        return Err(ParseError::FileTooSmall {
+            expected: BinaryHeader::SIZE,
+            found: data.len(),
+        });
+    }
+
+    // Parse and validate header
+    let header: &BinaryHeader = bytemuck::from_bytes(&data[..BinaryHeader::SIZE]);
+    header.validate()?;
+
+    // Calculate expected data size
+    let event_data_start = BinaryHeader::SIZE;
+    let event_data = &data[event_data_start..];
+    let actual_event_count = event_data.len() / BinaryEvent::SIZE;
+
+    // Verify event count matches header
+    if actual_event_count != header.event_count as usize {
+        return Err(ParseError::EventCountMismatch {
+            header_count: header.event_count,
+            actual_count: actual_event_count,
+        });
+    }
+
+    // Parse events
+    let binary_events: &[BinaryEvent] =
+        bytemuck::cast_slice(&event_data[..actual_event_count * BinaryEvent::SIZE]);
+
+    let events = binary_events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (*e).to_input_event(i))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Build metadata (binary format doesn't include created_at or source)
+    let metadata = LogMetadata {
+        version: header.version,
+        target_fps: header.target_fps,
+        frame_count: header.frame_count,
+        created_at: None,
+        source: None,
+    };
+
+    // Binary format doesn't include mappings - create default mappings from events
+    let mappings = generate_default_mappings(&events);
+
+    Ok(InputLog {
+        metadata,
+        mappings,
+        events,
+    })
+}
+
+/// Generate default mappings from events.
+///
+/// Since binary format doesn't include mapping information, this function
+/// creates default mappings based on the unique input IDs found in events.
+fn generate_default_mappings(events: &[InputEvent]) -> Vec<InputMapping> {
+    use std::collections::BTreeSet;
+
+    // Collect unique input IDs (BTreeSet keeps them sorted)
+    let unique_ids: BTreeSet<u32> = events.iter().map(|e| e.id).collect();
+
+    unique_ids
+        .into_iter()
+        .map(|id| InputMapping {
+            id,
+            name: format!("Input {}", id),
+            color: None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -459,5 +693,224 @@ mod tests {
         let button_event = button_event.unwrap();
         assert_eq!(button_event.kind, InputKind::Button);
         assert_eq!(button_event.state, ButtonState::Pressed);
+    }
+
+    // ========================================================================
+    // Binary parser tests
+    // ========================================================================
+
+    /// Helper to create a valid binary header
+    fn create_test_header(frame_count: u64, event_count: u64) -> BinaryHeader {
+        BinaryHeader {
+            magic: *b"ILOG",
+            version: 1,
+            flags: 0,
+            target_fps: 60,
+            frame_count,
+            event_count,
+        }
+    }
+
+    /// Helper to create a test binary event
+    fn create_test_binary_event(frame: u64, id: u32, kind: u8, state: u8) -> BinaryEvent {
+        BinaryEvent {
+            frame,
+            id,
+            kind,
+            state,
+            _padding: [0, 0],
+            value: [1.0, 0.0],
+        }
+    }
+
+    #[test]
+    fn test_binary_header_size() {
+        // Header should be exactly 32 bytes as per spec
+        assert_eq!(BinaryHeader::SIZE, 32);
+    }
+
+    #[test]
+    fn test_binary_event_size() {
+        // Event should be exactly 24 bytes as per spec
+        assert_eq!(BinaryEvent::SIZE, 24);
+    }
+
+    #[test]
+    fn test_binary_header_validate_valid() {
+        let header = create_test_header(100, 5);
+        assert!(header.validate().is_ok());
+    }
+
+    #[test]
+    fn test_binary_header_validate_invalid_magic() {
+        let mut header = create_test_header(100, 5);
+        header.magic = *b"FAKE";
+        let result = header.validate();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidMagic { .. }
+        ));
+    }
+
+    #[test]
+    fn test_binary_header_validate_invalid_version() {
+        let mut header = create_test_header(100, 5);
+        header.version = 99;
+        let result = header.validate();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::UnsupportedVersion { version: 99 }
+        ));
+    }
+
+    #[test]
+    fn test_binary_event_to_input_event() {
+        let event = create_test_binary_event(10, 5, 0, 1); // Button, Pressed
+        let input_event = event.to_input_event(0).unwrap();
+
+        assert_eq!(input_event.frame, 10);
+        assert_eq!(input_event.id, 5);
+        assert_eq!(input_event.kind, InputKind::Button);
+        assert_eq!(input_event.state, ButtonState::Pressed);
+    }
+
+    #[test]
+    fn test_binary_event_invalid_kind() {
+        let event = create_test_binary_event(0, 0, 99, 0); // Invalid kind
+        let result = event.to_input_event(0);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidBinaryEvent { index: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn test_binary_event_invalid_state() {
+        let event = create_test_binary_event(0, 0, 0, 99); // Invalid state
+        let result = event.to_input_event(0);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidBinaryEvent { index: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn test_parse_binary_file_too_small() {
+        let data = vec![0u8; 10]; // Too small for header
+        let result = parse_binary(&data);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::FileTooSmall {
+                expected: 32,
+                found: 10
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_binary_empty_events() {
+        let header = create_test_header(100, 0);
+        let data: Vec<u8> = bytemuck::bytes_of(&header).to_vec();
+
+        let log = parse_binary(&data).unwrap();
+        assert_eq!(log.metadata.version, 1);
+        assert_eq!(log.metadata.target_fps, 60);
+        assert_eq!(log.metadata.frame_count, 100);
+        assert!(log.events.is_empty());
+        assert!(log.mappings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_binary_with_events() {
+        let header = create_test_header(100, 2);
+        let events = [
+            create_test_binary_event(0, 0, 0, 1), // Button, Pressed
+            create_test_binary_event(5, 1, 1, 0), // Axis1D, Released
+        ];
+
+        let mut data: Vec<u8> = bytemuck::bytes_of(&header).to_vec();
+        data.extend_from_slice(bytemuck::cast_slice(&events));
+
+        let log = parse_binary(&data).unwrap();
+        assert_eq!(log.events.len(), 2);
+
+        assert_eq!(log.events[0].frame, 0);
+        assert_eq!(log.events[0].id, 0);
+        assert_eq!(log.events[0].kind, InputKind::Button);
+        assert_eq!(log.events[0].state, ButtonState::Pressed);
+
+        assert_eq!(log.events[1].frame, 5);
+        assert_eq!(log.events[1].id, 1);
+        assert_eq!(log.events[1].kind, InputKind::Axis1D);
+    }
+
+    #[test]
+    fn test_parse_binary_event_count_mismatch() {
+        let header = create_test_header(100, 5); // Claims 5 events
+        let events = [create_test_binary_event(0, 0, 0, 0)]; // Only 1 event
+
+        let mut data: Vec<u8> = bytemuck::bytes_of(&header).to_vec();
+        data.extend_from_slice(bytemuck::cast_slice(&events));
+
+        let result = parse_binary(&data);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::EventCountMismatch {
+                header_count: 5,
+                actual_count: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_binary_generates_default_mappings() {
+        let header = create_test_header(100, 3);
+        let events = [
+            create_test_binary_event(0, 5, 0, 1),
+            create_test_binary_event(1, 10, 0, 1),
+            create_test_binary_event(2, 5, 0, 0), // Duplicate ID
+        ];
+
+        let mut data: Vec<u8> = bytemuck::bytes_of(&header).to_vec();
+        data.extend_from_slice(bytemuck::cast_slice(&events));
+
+        let log = parse_binary(&data).unwrap();
+
+        // Should have 2 unique mappings (IDs 5 and 10)
+        assert_eq!(log.mappings.len(), 2);
+
+        // Mappings should be sorted by ID
+        assert_eq!(log.mappings[0].id, 5);
+        assert_eq!(log.mappings[0].name, "Input 5");
+        assert_eq!(log.mappings[1].id, 10);
+        assert_eq!(log.mappings[1].name, "Input 10");
+    }
+
+    #[test]
+    fn test_parse_sample_ilb() {
+        // Test parsing the actual sample.ilb file
+        let data = include_bytes!("../../assets/sample.ilb");
+        let log = parse_binary(data).expect("Failed to parse sample.ilb");
+
+        // Verify metadata
+        assert_eq!(log.metadata.version, 1);
+        assert_eq!(log.metadata.target_fps, 60);
+        assert_eq!(log.metadata.frame_count, 120);
+
+        // Binary format doesn't include created_at or source
+        assert!(log.metadata.created_at.is_none());
+        assert!(log.metadata.source.is_none());
+
+        // Verify events were parsed
+        assert!(!log.events.is_empty());
+
+        // Verify mappings were generated
+        assert!(!log.mappings.is_empty());
     }
 }
