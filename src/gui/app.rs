@@ -208,10 +208,12 @@ impl InputLogViewerApp {
         }
     }
 
-    /// Open a file dialog and load the selected .ilj file.
+    /// Open a file dialog and load the selected input log file (.ilj or .ilb).
     fn open_file_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Input Log Files", &["ilj", "ilb"])
             .add_filter("Input Log JSON", &["ilj"])
+            .add_filter("Input Log Binary", &["ilb"])
             .set_title("Open Input Log File")
             .pick_file()
         {
@@ -220,37 +222,64 @@ impl InputLogViewerApp {
     }
 
     /// Load an input log file from the given path.
+    ///
+    /// Auto-detects the file format based on extension:
+    /// - `.ilj` files are parsed as JSON
+    /// - `.ilb` files are parsed as binary
     fn load_file(&mut self, path: PathBuf) {
-        match std::fs::read_to_string(&path) {
-            Ok(content) => match parser::parse_json(&content) {
-                Ok(log) => {
-                    let frame_count = log.metadata.frame_count;
-                    let event_count = log.events.len();
-                    // Initialize filter with all inputs visible
-                    self.filter.initialize_from_log(&log);
-                    // Reset search state for new file
-                    self.search.reset();
-                    self.log = Some(log);
-                    self.loaded_file_path = Some(path.clone());
-                    self.state = AppState::Ready;
-                    self.status_message = Some(StatusMessage::new(
-                        format!(
-                            "Loaded: {} ({} frames, {} events)",
-                            path.file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "file".to_string()),
-                            frame_count,
-                            event_count
-                        ),
-                        StatusKind::Success,
-                    ));
-                }
-                Err(e) => {
-                    self.set_error(format!("Parse error: {}", e));
-                }
-            },
+        // Determine format from extension
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|s| s.to_lowercase());
+
+        let parse_result = match extension.as_deref() {
+            Some("ilj") => {
+                // JSON format - read as string
+                std::fs::read_to_string(&path)
+                    .map_err(|e| format!("Failed to read file: {}", e))
+                    .and_then(|content| {
+                        parser::parse_json(&content).map_err(|e| format!("Parse error: {}", e))
+                    })
+            }
+            Some("ilb") => {
+                // Binary format - read as bytes
+                std::fs::read(&path)
+                    .map_err(|e| format!("Failed to read file: {}", e))
+                    .and_then(|data| {
+                        parser::parse_binary(&data).map_err(|e| format!("Parse error: {}", e))
+                    })
+            }
+            _ => {
+                Err("Unsupported file format. Please use .ilj (JSON) or .ilb (binary).".to_string())
+            }
+        };
+
+        match parse_result {
+            Ok(log) => {
+                let frame_count = log.metadata.frame_count;
+                let event_count = log.events.len();
+                // Initialize filter with all inputs visible
+                self.filter.initialize_from_log(&log);
+                // Reset search state for new file
+                self.search.reset();
+                self.log = Some(log);
+                self.loaded_file_path = Some(path.clone());
+                self.state = AppState::Ready;
+                self.status_message = Some(StatusMessage::new(
+                    format!(
+                        "Loaded: {} ({} frames, {} events)",
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "file".to_string()),
+                        frame_count,
+                        event_count
+                    ),
+                    StatusKind::Success,
+                ));
+            }
             Err(e) => {
-                self.set_error(format!("Failed to read file: {}", e));
+                self.set_error(e);
             }
         }
     }
