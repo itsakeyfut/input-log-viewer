@@ -36,6 +36,10 @@ pub struct ControlsRenderer<'a> {
     playback: &'a PlaybackState,
     /// Total number of frames in the log
     total_frames: u64,
+    /// Whether the current frame is at the start boundary
+    at_start: bool,
+    /// Whether the current frame is at the end boundary
+    at_end: bool,
 }
 
 impl<'a> ControlsRenderer<'a> {
@@ -46,11 +50,17 @@ impl<'a> ControlsRenderer<'a> {
         playback: &'a PlaybackState,
         total_frames: u64,
     ) -> Self {
+        // Pre-compute boundary states for button disabling
+        let at_start = playback.is_at_start();
+        let at_end = playback.is_at_end(total_frames);
+
         Self {
             enabled,
             is_playing,
             playback,
             total_frames,
+            at_start,
+            at_end,
         }
     }
 
@@ -90,35 +100,59 @@ impl<'a> ControlsRenderer<'a> {
     fn render_navigation_buttons(&self, ui: &mut egui::Ui) -> Option<ControlAction> {
         let mut action: Option<ControlAction> = None;
 
-        ui.add_enabled_ui(self.enabled, |ui| {
-            if ui.button("⏮").on_hover_text("Go to start (Home)").clicked() {
-                action = Some(ControlAction::GoToStart);
-            }
-            if ui
-                .button("⏪")
-                .on_hover_text("Previous frame (←)")
-                .clicked()
-            {
-                action = Some(ControlAction::PreviousFrame);
-            }
+        // Go to start button - disabled when already at start
+        let start_enabled = self.enabled && !self.at_start;
+        if ui
+            .add_enabled(start_enabled, egui::Button::new("⏮"))
+            .on_hover_text("Go to start (Home)")
+            .clicked()
+        {
+            action = Some(ControlAction::GoToStart);
+        }
 
-            // Play/pause button with icon based on current state
-            let (btn_text, hover_text) = if self.is_playing {
-                ("⏸", "Pause (Space)")
-            } else {
-                ("▶", "Play (Space)")
-            };
-            if ui.button(btn_text).on_hover_text(hover_text).clicked() {
-                action = Some(ControlAction::TogglePlayPause);
-            }
+        // Previous frame button - disabled when at start
+        let prev_enabled = self.enabled && !self.at_start;
+        if ui
+            .add_enabled(prev_enabled, egui::Button::new("⏪"))
+            .on_hover_text("Previous frame (←)")
+            .clicked()
+        {
+            action = Some(ControlAction::PreviousFrame);
+        }
 
-            if ui.button("⏩").on_hover_text("Next frame (→)").clicked() {
-                action = Some(ControlAction::NextFrame);
-            }
-            if ui.button("⏭").on_hover_text("Go to end (End)").clicked() {
-                action = Some(ControlAction::GoToEnd);
-            }
-        });
+        // Play/pause button - always enabled when controls are enabled
+        let (btn_text, hover_text) = if self.is_playing {
+            ("⏸", "Pause (Space)")
+        } else {
+            ("▶", "Play (Space)")
+        };
+        if ui
+            .add_enabled(self.enabled, egui::Button::new(btn_text))
+            .on_hover_text(hover_text)
+            .clicked()
+        {
+            action = Some(ControlAction::TogglePlayPause);
+        }
+
+        // Next frame button - disabled when at end
+        let next_enabled = self.enabled && !self.at_end;
+        if ui
+            .add_enabled(next_enabled, egui::Button::new("⏩"))
+            .on_hover_text("Next frame (→)")
+            .clicked()
+        {
+            action = Some(ControlAction::NextFrame);
+        }
+
+        // Go to end button - disabled when already at end
+        let end_enabled = self.enabled && !self.at_end;
+        if ui
+            .add_enabled(end_enabled, egui::Button::new("⏭"))
+            .on_hover_text("Go to end (End)")
+            .clicked()
+        {
+            action = Some(ControlAction::GoToEnd);
+        }
 
         action
     }

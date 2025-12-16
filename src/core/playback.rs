@@ -203,6 +203,25 @@ impl PlaybackState {
     pub fn reset_timing(&mut self) {
         self.last_update = Instant::now();
     }
+
+    /// Check if the current frame is at the start boundary.
+    ///
+    /// Returns `true` if we're at the effective start and cannot go further back
+    /// (either loop is disabled, or we're implementing boundary-aware UI).
+    pub fn is_at_start(&self) -> bool {
+        self.current_frame <= self.effective_start()
+    }
+
+    /// Check if the current frame is at the end boundary.
+    ///
+    /// # Arguments
+    /// * `total_frames` - The total number of frames in the log.
+    ///
+    /// Returns `true` if we're at the effective end and cannot go further forward
+    /// (either loop is disabled, or we're implementing boundary-aware UI).
+    pub fn is_at_end(&self, total_frames: u64) -> bool {
+        self.current_frame >= self.effective_end(total_frames)
+    }
 }
 
 #[cfg(test)]
@@ -386,5 +405,77 @@ mod tests {
         state.clear_range();
         assert!(state.range_start.is_none());
         assert!(state.range_end.is_none());
+    }
+
+    #[test]
+    fn test_is_at_start() {
+        let mut state = PlaybackState::new();
+
+        // At frame 0, should be at start
+        state.current_frame = 0;
+        assert!(state.is_at_start());
+
+        // At frame 10, should not be at start
+        state.current_frame = 10;
+        assert!(!state.is_at_start());
+
+        // With range set, should use effective_start
+        state.set_range(Some(5), None);
+        state.current_frame = 5;
+        assert!(state.is_at_start());
+
+        state.current_frame = 4;
+        assert!(state.is_at_start()); // Below range start, still considered at start
+
+        state.current_frame = 6;
+        assert!(!state.is_at_start());
+    }
+
+    #[test]
+    fn test_is_at_end() {
+        let mut state = PlaybackState::new();
+        let total_frames = 100;
+
+        // At frame 99 (last frame), should be at end
+        state.current_frame = 99;
+        assert!(state.is_at_end(total_frames));
+
+        // At frame 50, should not be at end
+        state.current_frame = 50;
+        assert!(!state.is_at_end(total_frames));
+
+        // At frame 0, should not be at end
+        state.current_frame = 0;
+        assert!(!state.is_at_end(total_frames));
+
+        // With range set, should use effective_end
+        state.set_range(None, Some(50));
+        state.current_frame = 50;
+        assert!(state.is_at_end(total_frames));
+
+        state.current_frame = 51;
+        assert!(state.is_at_end(total_frames)); // Above range end, still considered at end
+
+        state.current_frame = 49;
+        assert!(!state.is_at_end(total_frames));
+    }
+
+    #[test]
+    fn test_boundary_with_empty_log() {
+        let state = PlaybackState::new();
+
+        // With 0 total frames, should be at both boundaries
+        assert!(state.is_at_start());
+        assert!(state.is_at_end(0));
+    }
+
+    #[test]
+    fn test_boundary_with_single_frame() {
+        let mut state = PlaybackState::new();
+        state.current_frame = 0;
+
+        // With 1 total frame, frame 0 is both start and end
+        assert!(state.is_at_start());
+        assert!(state.is_at_end(1));
     }
 }

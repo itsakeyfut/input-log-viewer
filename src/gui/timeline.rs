@@ -157,7 +157,7 @@ impl<'a> TimelineRenderer<'a> {
         let end_frame = start_frame + self.config.visible_frames;
 
         // Align to interval (ceiling division to get next multiple >= start_frame)
-        let first_marker = ((start_frame + interval - 1) / interval) * interval;
+        let first_marker = start_frame.div_ceil(interval) * interval;
 
         let mut frame = first_marker;
         while frame <= end_frame {
@@ -272,7 +272,7 @@ impl<'a> TimelineRenderer<'a> {
         let end_frame = start_frame + self.config.visible_frames;
 
         // Align to interval (ceiling division to get next multiple >= start_frame)
-        let first_marker = ((start_frame + interval - 1) / interval) * interval;
+        let first_marker = start_frame.div_ceil(interval) * interval;
 
         let mut frame = first_marker;
         while frame <= end_frame {
