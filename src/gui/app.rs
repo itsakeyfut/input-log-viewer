@@ -395,11 +395,31 @@ impl InputLogViewerApp {
                 if let Some(ref log) = self.log {
                     // Input type filters
                     ui.label("Input Types:");
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.filter.show_button, "Buttons");
+
+                    // Button type checkbox - prevent unchecking if it's the last enabled type
+                    let button_can_toggle = self
+                        .filter
+                        .can_disable_type(crate::core::log::InputKind::Button);
+                    ui.add_enabled_ui(button_can_toggle, |ui| {
+                        ui.checkbox(&mut self.filter.show_button, "Button");
+                    });
+
+                    // Axis1D type checkbox - prevent unchecking if it's the last enabled type
+                    let axis1d_can_toggle = self
+                        .filter
+                        .can_disable_type(crate::core::log::InputKind::Axis1D);
+                    ui.add_enabled_ui(axis1d_can_toggle, |ui| {
                         ui.checkbox(&mut self.filter.show_axis1d, "Axis1D");
+                    });
+
+                    // Axis2D type checkbox - prevent unchecking if it's the last enabled type
+                    let axis2d_can_toggle = self
+                        .filter
+                        .can_disable_type(crate::core::log::InputKind::Axis2D);
+                    ui.add_enabled_ui(axis2d_can_toggle, |ui| {
                         ui.checkbox(&mut self.filter.show_axis2d, "Axis2D");
                     });
+
                     ui.separator();
 
                     // Individual input checkboxes

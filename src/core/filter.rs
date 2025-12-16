@@ -148,6 +148,61 @@ impl FilterState {
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }
+
+    /// Count how many input types are currently enabled.
+    pub fn enabled_type_count(&self) -> u32 {
+        let mut count = 0;
+        if self.show_button {
+            count += 1;
+        }
+        if self.show_axis1d {
+            count += 1;
+        }
+        if self.show_axis2d {
+            count += 1;
+        }
+        count
+    }
+
+    /// Check if a specific input type can be disabled.
+    /// Returns false if this is the last enabled type (to prevent empty view).
+    pub fn can_disable_type(&self, kind: InputKind) -> bool {
+        let is_currently_enabled = match kind {
+            InputKind::Button => self.show_button,
+            InputKind::Axis1D => self.show_axis1d,
+            InputKind::Axis2D => self.show_axis2d,
+        };
+
+        // Can always enable, but can only disable if at least one other type remains
+        !is_currently_enabled || self.enabled_type_count() > 1
+    }
+
+    /// Set the visibility of a specific input type.
+    /// Returns true if the change was applied, false if it would result in no types enabled.
+    #[allow(dead_code)] // Utility method for programmatic type filtering
+    pub fn set_type_visible(&mut self, kind: InputKind, visible: bool) -> bool {
+        // Always allow enabling
+        if visible {
+            match kind {
+                InputKind::Button => self.show_button = true,
+                InputKind::Axis1D => self.show_axis1d = true,
+                InputKind::Axis2D => self.show_axis2d = true,
+            }
+            return true;
+        }
+
+        // Check if we can disable this type
+        if !self.can_disable_type(kind) {
+            return false;
+        }
+
+        match kind {
+            InputKind::Button => self.show_button = false,
+            InputKind::Axis1D => self.show_axis1d = false,
+            InputKind::Axis2D => self.show_axis2d = false,
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -283,5 +338,65 @@ mod tests {
         filter.show_axis1d = false;
         assert!(filter.is_visible(0, InputKind::Button));
         assert!(!filter.is_visible(10, InputKind::Axis1D));
+    }
+
+    #[test]
+    fn test_enabled_type_count() {
+        let mut filter = FilterState::new();
+
+        // All enabled by default
+        assert_eq!(filter.enabled_type_count(), 3);
+
+        // Disable one
+        filter.show_button = false;
+        assert_eq!(filter.enabled_type_count(), 2);
+
+        // Disable another
+        filter.show_axis1d = false;
+        assert_eq!(filter.enabled_type_count(), 1);
+
+        // Disable all (not recommended, but testing the count)
+        filter.show_axis2d = false;
+        assert_eq!(filter.enabled_type_count(), 0);
+    }
+
+    #[test]
+    fn test_can_disable_type() {
+        let mut filter = FilterState::new();
+
+        // All enabled - can disable any
+        assert!(filter.can_disable_type(InputKind::Button));
+        assert!(filter.can_disable_type(InputKind::Axis1D));
+        assert!(filter.can_disable_type(InputKind::Axis2D));
+
+        // Disable two types - cannot disable the last one
+        filter.show_button = false;
+        filter.show_axis1d = false;
+        assert!(!filter.can_disable_type(InputKind::Axis2D));
+
+        // Can still enable (can_disable returns true for disabled types)
+        assert!(filter.can_disable_type(InputKind::Button)); // Already disabled
+        assert!(filter.can_disable_type(InputKind::Axis1D)); // Already disabled
+    }
+
+    #[test]
+    fn test_set_type_visible() {
+        let mut filter = FilterState::new();
+
+        // Disable Button type
+        assert!(filter.set_type_visible(InputKind::Button, false));
+        assert!(!filter.show_button);
+
+        // Disable Axis1D type
+        assert!(filter.set_type_visible(InputKind::Axis1D, false));
+        assert!(!filter.show_axis1d);
+
+        // Cannot disable last type (Axis2D)
+        assert!(!filter.set_type_visible(InputKind::Axis2D, false));
+        assert!(filter.show_axis2d); // Still enabled
+
+        // Can enable any type
+        assert!(filter.set_type_visible(InputKind::Button, true));
+        assert!(filter.show_button);
     }
 }
