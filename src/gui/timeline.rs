@@ -6,6 +6,7 @@
 use eframe::egui::{self, Color32, Painter, Pos2, Rect, Stroke};
 use std::collections::HashMap;
 
+use crate::core::filter::FilterState;
 use crate::core::log::{ButtonState, InputEvent, InputKind, InputLog, InputMapping};
 
 /// Default number of visible frames in the timeline.
@@ -49,7 +50,11 @@ pub struct TimelineRenderer<'a> {
     log: &'a InputLog,
     /// Rendering configuration
     config: &'a TimelineConfig,
-    /// Map from input ID to row index
+    /// Filter state for input visibility
+    filter: &'a FilterState,
+    /// Visible mappings based on current filter
+    visible_mappings: Vec<&'a InputMapping>,
+    /// Map from input ID to row index (among visible rows)
     id_to_row: HashMap<u32, usize>,
     /// Map from input ID to its mapping (for name and color)
     id_to_mapping: HashMap<u32, &'a InputMapping>,
@@ -57,10 +62,25 @@ pub struct TimelineRenderer<'a> {
 
 impl<'a> TimelineRenderer<'a> {
     /// Create a new timeline renderer for the given log.
-    pub fn new(log: &'a InputLog, config: &'a TimelineConfig) -> Self {
-        // Build ID to row mapping based on mappings order
-        let id_to_row: HashMap<u32, usize> = log
+    pub fn new(log: &'a InputLog, config: &'a TimelineConfig, filter: &'a FilterState) -> Self {
+        // Build ID to kind mapping by scanning events
+        let mut id_to_kind: HashMap<u32, InputKind> = HashMap::new();
+        for event in &log.events {
+            id_to_kind.entry(event.id).or_insert(event.kind);
+        }
+
+        // Filter visible mappings based on filter state
+        let visible_mappings: Vec<&InputMapping> = log
             .mappings
+            .iter()
+            .filter(|m| {
+                let kind = id_to_kind.get(&m.id).copied().unwrap_or(InputKind::Button);
+                filter.is_visible(m.id, kind)
+            })
+            .collect();
+
+        // Build ID to row mapping based on visible mappings order
+        let id_to_row: HashMap<u32, usize> = visible_mappings
             .iter()
             .enumerate()
             .map(|(i, m)| (m.id, i))
@@ -73,6 +93,8 @@ impl<'a> TimelineRenderer<'a> {
         Self {
             log,
             config,
+            filter,
+            visible_mappings,
             id_to_row,
             id_to_mapping,
         }
@@ -94,14 +116,14 @@ impl<'a> TimelineRenderer<'a> {
 
     /// Calculate the total height needed for the timeline.
     pub fn calculate_height(&self) -> f32 {
-        let num_rows = self.log.mappings.len().max(1);
+        let num_rows = self.visible_mappings.len().max(1);
         HEADER_HEIGHT + (num_rows as f32 * ROW_HEIGHT)
     }
 
     /// Render the complete timeline.
     pub fn render(&self, ui: &mut egui::Ui) {
         let available_size = ui.available_size();
-        let num_rows = self.log.mappings.len().max(1);
+        let num_rows = self.visible_mappings.len().max(1);
         let grid_height = self.calculate_height().min(available_size.y - 10.0);
 
         let (response, painter) = ui.allocate_painter(
@@ -222,13 +244,13 @@ impl<'a> TimelineRenderer<'a> {
             Stroke::new(1.0, Color32::DARK_GRAY),
         );
 
-        // Draw each row label
+        // Draw each row label (using filtered visible mappings)
         for i in 0..num_rows {
             let row_top = rect.top() + HEADER_HEIGHT + (i as f32 * ROW_HEIGHT);
             let row_center_y = row_top + ROW_HEIGHT / 2.0;
 
-            if i < self.log.mappings.len() {
-                let mapping = &self.log.mappings[i];
+            if i < self.visible_mappings.len() {
+                let mapping = self.visible_mappings[i];
                 let color = mapping
                     .color
                     .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
@@ -305,7 +327,12 @@ impl<'a> TimelineRenderer<'a> {
                 continue;
             }
 
-            // Skip events without a row mapping
+            // Skip events that are filtered out by type or ID filter
+            if !self.filter.is_visible(event.id, event.kind) {
+                continue;
+            }
+
+            // Skip events without a row mapping (among visible rows)
             let row = match self.get_row(event.id) {
                 Some(r) => r,
                 None => continue,
