@@ -11,16 +11,81 @@ use crate::core::parser;
 
 use super::timeline::{TimelineConfig, TimelineRenderer};
 
+/// Error information for the error state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppError {
+    /// Error message to display
+    pub message: String,
+    /// Whether the error is recoverable (can return to previous state)
+    pub recoverable: bool,
+}
+
+impl AppError {
+    /// Create a new recoverable error.
+    pub fn recoverable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            recoverable: true,
+        }
+    }
+
+    /// Create a new non-recoverable error.
+    #[allow(dead_code)] // Will be used when implementing fatal error handling
+    pub fn fatal(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            recoverable: false,
+        }
+    }
+}
+
 /// Application state indicating the current loading status.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum AppState {
     /// No file has been loaded yet (initial state)
     #[default]
     NoFileLoaded,
+    /// File loading in progress
+    #[allow(dead_code)] // Will be used for async file loading
+    Loading,
     /// A file has been successfully loaded and is ready for viewing
     Ready,
-    /// An error occurred during loading
-    Error(String),
+    /// Playback is in progress
+    #[allow(dead_code)] // Will be used when implementing playback
+    Playing,
+    /// An error occurred
+    Error(AppError),
+}
+
+impl AppState {
+    /// Returns true if the application is in a state where file operations are allowed.
+    pub fn can_open_file(&self) -> bool {
+        matches!(
+            self,
+            AppState::NoFileLoaded | AppState::Ready | AppState::Playing | AppState::Error(_)
+        )
+    }
+
+    /// Returns true if toolbar controls (filter, search) should be enabled.
+    pub fn toolbar_enabled(&self) -> bool {
+        matches!(self, AppState::Ready | AppState::Playing)
+    }
+
+    /// Returns true if playback controls should be enabled.
+    pub fn controls_enabled(&self) -> bool {
+        matches!(self, AppState::Ready | AppState::Playing)
+    }
+
+    /// Returns true if the timeline should be displayed.
+    #[allow(dead_code)] // Will be used for conditional timeline rendering
+    pub fn show_timeline(&self) -> bool {
+        matches!(self, AppState::Ready | AppState::Playing)
+    }
+
+    /// Returns true if playback is currently active.
+    pub fn is_playing(&self) -> bool {
+        matches!(self, AppState::Playing)
+    }
 }
 
 /// Kind of status message to display.
@@ -133,7 +198,7 @@ impl InputLogViewerApp {
 
     /// Set an error state and display an error message.
     fn set_error(&mut self, message: String) {
-        self.state = AppState::Error(message.clone());
+        self.state = AppState::Error(AppError::recoverable(message.clone()));
         self.status_message = Some(StatusMessage::new(message, StatusKind::Error));
     }
 
@@ -160,34 +225,43 @@ impl InputLogViewerApp {
     ///
     /// Contains file loading, filter options, and search functionality.
     fn render_toolbar(&mut self, ctx: &egui::Context) {
+        let can_open = self.state.can_open_file();
+        let toolbar_enabled = self.state.toolbar_enabled();
+
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Input Log Viewer");
                 ui.separator();
 
-                // File loading button
-                if ui.button("📂 Open File").clicked() {
-                    self.open_file_dialog();
-                }
+                // File loading button (enabled based on state)
+                ui.add_enabled_ui(can_open, |ui| {
+                    if ui.button("📂 Open File").clicked() {
+                        self.open_file_dialog();
+                    }
+                });
 
                 ui.separator();
 
-                // Filter dropdown placeholder
-                ui.label("Filter:");
-                egui::ComboBox::from_id_salt("filter_combo")
-                    .selected_text("All Inputs")
-                    .show_ui(ui, |ui| {
-                        let _ = ui.selectable_label(true, "All Inputs");
-                        let _ = ui.selectable_label(false, "Buttons Only");
-                        let _ = ui.selectable_label(false, "Axes Only");
-                    });
+                // Filter dropdown (enabled only when file is loaded)
+                ui.add_enabled_ui(toolbar_enabled, |ui| {
+                    ui.label("Filter:");
+                    egui::ComboBox::from_id_salt("filter_combo")
+                        .selected_text("All Inputs")
+                        .show_ui(ui, |ui| {
+                            let _ = ui.selectable_label(true, "All Inputs");
+                            let _ = ui.selectable_label(false, "Buttons Only");
+                            let _ = ui.selectable_label(false, "Axes Only");
+                        });
+                });
 
                 ui.separator();
 
-                // Search button placeholder
-                if ui.button("🔍 Search").clicked() {
-                    // TODO: Implement search dialog in Phase 3
-                }
+                // Search button (enabled only when file is loaded)
+                ui.add_enabled_ui(toolbar_enabled, |ui| {
+                    if ui.button("🔍 Search").clicked() {
+                        // TODO: Implement search dialog in Phase 3
+                    }
+                });
 
                 // Show status message in toolbar (right-aligned)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -248,28 +322,40 @@ impl InputLogViewerApp {
     ///
     /// Contains playback controls, frame navigation, and speed settings.
     fn render_controls(&mut self, ctx: &egui::Context) {
+        let controls_enabled = self.state.controls_enabled();
+        let is_playing = self.state.is_playing();
+
         egui::TopBottomPanel::bottom("controls")
             .min_height(80.0)
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
                     // Playback controls row
                     ui.horizontal(|ui| {
-                        // Navigation buttons
-                        if ui.button("⏮").on_hover_text("Go to start").clicked() {
-                            // TODO: Implement in Phase 2
-                        }
-                        if ui.button("⏪").on_hover_text("Previous frame").clicked() {
-                            // TODO: Implement in Phase 2
-                        }
-                        if ui.button("▶").on_hover_text("Play/Pause").clicked() {
-                            // TODO: Implement in Phase 2
-                        }
-                        if ui.button("⏩").on_hover_text("Next frame").clicked() {
-                            // TODO: Implement in Phase 2
-                        }
-                        if ui.button("⏭").on_hover_text("Go to end").clicked() {
-                            // TODO: Implement in Phase 2
-                        }
+                        // Navigation buttons (disabled when no file or loading)
+                        ui.add_enabled_ui(controls_enabled, |ui| {
+                            if ui.button("⏮").on_hover_text("Go to start").clicked() {
+                                // TODO: Implement in Phase 2
+                            }
+                            if ui.button("⏪").on_hover_text("Previous frame").clicked() {
+                                // TODO: Implement in Phase 2
+                            }
+                            // Show pause icon when playing, play icon otherwise
+                            let play_btn_text = if is_playing { "⏸" } else { "▶" };
+                            let play_btn_hover = if is_playing { "Pause" } else { "Play" };
+                            if ui
+                                .button(play_btn_text)
+                                .on_hover_text(play_btn_hover)
+                                .clicked()
+                            {
+                                // TODO: Implement in Phase 2
+                            }
+                            if ui.button("⏩").on_hover_text("Next frame").clicked() {
+                                // TODO: Implement in Phase 2
+                            }
+                            if ui.button("⏭").on_hover_text("Go to end").clicked() {
+                                // TODO: Implement in Phase 2
+                            }
+                        });
 
                         ui.separator();
 
@@ -286,30 +372,34 @@ impl InputLogViewerApp {
 
                         ui.separator();
 
-                        // Speed control
-                        ui.label("Speed:");
-                        egui::ComboBox::from_id_salt("speed_combo")
-                            .selected_text("1.0x")
-                            .width(60.0)
-                            .show_ui(ui, |ui| {
-                                let _ = ui.selectable_label(false, "0.25x");
-                                let _ = ui.selectable_label(false, "0.5x");
-                                let _ = ui.selectable_label(true, "1.0x");
-                                let _ = ui.selectable_label(false, "2.0x");
-                                let _ = ui.selectable_label(false, "4.0x");
-                            });
+                        // Speed control (disabled when no file or loading)
+                        ui.add_enabled_ui(controls_enabled, |ui| {
+                            ui.label("Speed:");
+                            egui::ComboBox::from_id_salt("speed_combo")
+                                .selected_text("1.0x")
+                                .width(60.0)
+                                .show_ui(ui, |ui| {
+                                    let _ = ui.selectable_label(false, "0.25x");
+                                    let _ = ui.selectable_label(false, "0.5x");
+                                    let _ = ui.selectable_label(true, "1.0x");
+                                    let _ = ui.selectable_label(false, "2.0x");
+                                    let _ = ui.selectable_label(false, "4.0x");
+                                });
+                        });
                     });
 
                     ui.add_space(4.0);
 
-                    // Timeline scrubber row
+                    // Timeline scrubber row (disabled when no file or loading)
                     ui.horizontal(|ui| {
-                        let mut frame: f32 = 0.0;
-                        ui.add(
-                            egui::Slider::new(&mut frame, 0.0..=100.0)
-                                .show_value(false)
-                                .text(""),
-                        );
+                        ui.add_enabled_ui(controls_enabled, |ui| {
+                            let mut frame: f32 = 0.0;
+                            ui.add(
+                                egui::Slider::new(&mut frame, 0.0..=100.0)
+                                    .show_value(false)
+                                    .text(""),
+                            );
+                        });
                     });
 
                     // Bookmarks row
@@ -331,7 +421,10 @@ impl InputLogViewerApp {
                 AppState::NoFileLoaded => {
                     self.render_no_file_placeholder(ui);
                 }
-                AppState::Ready => {
+                AppState::Loading => {
+                    self.render_loading_placeholder(ui);
+                }
+                AppState::Ready | AppState::Playing => {
                     self.render_loaded_timeline(ui);
                 }
                 AppState::Error(_) => {
@@ -361,6 +454,20 @@ impl InputLogViewerApp {
             ui.add_space(10.0);
 
             self.draw_placeholder_grid(ui);
+        });
+    }
+
+    /// Render the loading placeholder view.
+    fn render_loading_placeholder(&self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(50.0);
+
+            ui.heading("⏳ Loading...");
+            ui.add_space(20.0);
+            ui.label("Please wait while the file is being loaded.");
+
+            ui.add_space(20.0);
+            ui.spinner();
         });
     }
 
