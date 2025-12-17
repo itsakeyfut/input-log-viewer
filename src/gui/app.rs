@@ -167,6 +167,95 @@ impl SearchState {
     }
 }
 
+/// State for managing frame range selection.
+#[derive(Debug, Clone, Default)]
+pub struct SelectionState {
+    /// Start frame of the selection (always the smaller frame number).
+    pub start: Option<u64>,
+    /// End frame of the selection (always the larger frame number).
+    pub end: Option<u64>,
+    /// Whether a drag selection is currently in progress.
+    pub is_dragging: bool,
+    /// Frame where the drag started (used during drag to compute selection).
+    pub drag_start_frame: Option<u64>,
+}
+
+impl SelectionState {
+    /// Create a new selection state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if there is an active selection.
+    pub fn has_selection(&self) -> bool {
+        self.start.is_some() && self.end.is_some()
+    }
+
+    /// Get the selection as a (start, end) tuple if available.
+    pub fn get_selection(&self) -> Option<(u64, u64)> {
+        match (self.start, self.end) {
+            (Some(start), Some(end)) => Some((start, end)),
+            _ => None,
+        }
+    }
+
+    /// Start a drag selection from the given frame.
+    pub fn start_drag(&mut self, frame: u64) {
+        self.is_dragging = true;
+        self.drag_start_frame = Some(frame);
+        // Clear any existing selection when starting a new drag
+        self.start = None;
+        self.end = None;
+    }
+
+    /// Update the drag selection to the given frame.
+    /// This computes the proper start/end based on drag direction.
+    pub fn update_drag(&mut self, frame: u64) {
+        if let Some(drag_start) = self.drag_start_frame {
+            // Ensure start <= end regardless of drag direction
+            if frame < drag_start {
+                self.start = Some(frame);
+                self.end = Some(drag_start);
+            } else {
+                self.start = Some(drag_start);
+                self.end = Some(frame);
+            }
+        }
+    }
+
+    /// Finish the drag selection.
+    pub fn finish_drag(&mut self) {
+        self.is_dragging = false;
+        self.drag_start_frame = None;
+    }
+
+    /// Set the selection directly.
+    #[allow(dead_code)]
+    pub fn set_selection(&mut self, start: u64, end: u64) {
+        // Ensure start <= end
+        if start <= end {
+            self.start = Some(start);
+            self.end = Some(end);
+        } else {
+            self.start = Some(end);
+            self.end = Some(start);
+        }
+    }
+
+    /// Clear the selection.
+    pub fn clear(&mut self) {
+        self.start = None;
+        self.end = None;
+        self.is_dragging = false;
+        self.drag_start_frame = None;
+    }
+
+    /// Reset the selection state when a new file is loaded.
+    pub fn reset(&mut self) {
+        self.clear();
+    }
+}
+
 /// State for managing bookmarks during a session.
 #[derive(Debug, Clone, Default)]
 pub struct BookmarkState {
@@ -362,6 +451,10 @@ pub struct InputLogViewerApp {
     bookmarks: BookmarkState,
     /// Whether to automatically scroll to keep current frame visible during playback
     auto_scroll: bool,
+    /// Selection state for frame range selection
+    selection: SelectionState,
+    /// Whether to loop playback within the selected range
+    loop_selection: bool,
 }
 
 impl InputLogViewerApp {
@@ -381,6 +474,8 @@ impl InputLogViewerApp {
             search: SearchState::new(),
             bookmarks: BookmarkState::new(),
             auto_scroll: true,
+            selection: SelectionState::new(),
+            loop_selection: false,
         }
     }
 
@@ -479,6 +574,11 @@ impl InputLogViewerApp {
                 self.search.reset();
                 // Reset bookmarks for new file
                 self.bookmarks.reset();
+                // Reset selection state for new file
+                self.selection.reset();
+                self.loop_selection = false;
+                // Clear playback range when loading new file
+                self.playback.clear_range();
                 self.log = Some(log);
                 self.loaded_file_path = Some(path.clone());
                 self.state = AppState::Ready;
@@ -626,6 +726,11 @@ impl InputLogViewerApp {
             // Minus (-): Decrease playback speed
             if i.key_pressed(egui::Key::Minus) {
                 return Some(ControlAction::DecreaseSpeed);
+            }
+
+            // Escape: Clear selection
+            if i.key_pressed(egui::Key::Escape) {
+                return Some(ControlAction::ClearSelection);
             }
 
             None
@@ -1438,6 +1543,8 @@ impl InputLogViewerApp {
                     visible_frames,
                     &mut zoom_input,
                     auto_scroll,
+                    self.selection.get_selection(),
+                    self.loop_selection,
                 );
                 action = renderer.render(ui);
             });
@@ -1578,6 +1685,22 @@ impl InputLogViewerApp {
             ControlAction::ToggleAutoScroll => {
                 self.auto_scroll = !self.auto_scroll;
             }
+            ControlAction::ToggleLoopSelection => {
+                self.loop_selection = !self.loop_selection;
+                // Update playback range based on loop selection state
+                if self.loop_selection {
+                    if let Some((start, end)) = self.selection.get_selection() {
+                        self.playback.set_range(Some(start), Some(end));
+                    }
+                } else {
+                    self.playback.clear_range();
+                }
+            }
+            ControlAction::ClearSelection => {
+                self.selection.clear();
+                self.loop_selection = false;
+                self.playback.clear_range();
+            }
         }
     }
 
@@ -1683,8 +1806,8 @@ impl InputLogViewerApp {
             ui.add_space(5.0);
         }
 
-        // Render the timeline using TimelineRenderer with filter, search results, and bookmarks
-        // Handle zoom action if triggered
+        // Render the timeline using TimelineRenderer with filter, search results, bookmarks, and selection
+        // Handle view action if triggered
         let view_action = if let Some(ref log) = self.log {
             let mut renderer = TimelineRenderer::new(log, &self.timeline_config, &self.filter);
             if self.search.has_searched && !self.search.results.is_empty() {
@@ -1693,6 +1816,9 @@ impl InputLogViewerApp {
             if !self.bookmarks.is_empty() {
                 renderer = renderer.with_bookmarks(&self.bookmarks.bookmarks);
             }
+            // Pass selection state to timeline renderer
+            renderer =
+                renderer.with_selection(self.selection.get_selection(), self.selection.is_dragging);
             renderer.render(ui)
         } else {
             None
@@ -1709,6 +1835,22 @@ impl InputLogViewerApp {
             }
             Some(ViewAction::Scroll { scroll_offset }) => {
                 self.timeline_config.scroll_offset = scroll_offset;
+            }
+            Some(ViewAction::StartSelection { frame }) => {
+                self.selection.start_drag(frame);
+            }
+            Some(ViewAction::UpdateSelection { frame }) => {
+                self.selection.update_drag(frame);
+            }
+            Some(ViewAction::FinishSelection) => {
+                self.selection.finish_drag();
+                // Automatically enable loop selection when selection is made
+                if self.selection.has_selection() {
+                    self.loop_selection = true;
+                    if let Some((start, end)) = self.selection.get_selection() {
+                        self.playback.set_range(Some(start), Some(end));
+                    }
+                }
             }
             None => {}
         }
@@ -2037,5 +2179,106 @@ mod tests {
 
         // Finish editing without starting should return false
         assert!(!state.finish_editing());
+    }
+
+    #[test]
+    fn test_selection_state_new() {
+        let state = SelectionState::new();
+        assert!(state.start.is_none());
+        assert!(state.end.is_none());
+        assert!(!state.is_dragging);
+        assert!(state.drag_start_frame.is_none());
+    }
+
+    #[test]
+    fn test_selection_state_has_selection() {
+        let mut state = SelectionState::new();
+        assert!(!state.has_selection());
+
+        state.start = Some(10);
+        assert!(!state.has_selection());
+
+        state.end = Some(20);
+        assert!(state.has_selection());
+    }
+
+    #[test]
+    fn test_selection_state_get_selection() {
+        let mut state = SelectionState::new();
+        assert!(state.get_selection().is_none());
+
+        state.start = Some(10);
+        state.end = Some(20);
+        assert_eq!(state.get_selection(), Some((10, 20)));
+    }
+
+    #[test]
+    fn test_selection_state_drag() {
+        let mut state = SelectionState::new();
+
+        // Start drag
+        state.start_drag(10);
+        assert!(state.is_dragging);
+        assert_eq!(state.drag_start_frame, Some(10));
+        assert!(state.start.is_none());
+        assert!(state.end.is_none());
+
+        // Update drag forward
+        state.update_drag(20);
+        assert_eq!(state.start, Some(10));
+        assert_eq!(state.end, Some(20));
+
+        // Update drag backward (should swap start/end)
+        state.start_drag(30);
+        state.update_drag(10);
+        assert_eq!(state.start, Some(10));
+        assert_eq!(state.end, Some(30));
+
+        // Finish drag
+        state.finish_drag();
+        assert!(!state.is_dragging);
+        assert!(state.drag_start_frame.is_none());
+        // Selection should remain after finishing drag
+        assert!(state.has_selection());
+    }
+
+    #[test]
+    fn test_selection_state_set_selection() {
+        let mut state = SelectionState::new();
+
+        // Set selection in order
+        state.set_selection(10, 20);
+        assert_eq!(state.start, Some(10));
+        assert_eq!(state.end, Some(20));
+
+        // Set selection reverse order (should be normalized)
+        state.set_selection(30, 15);
+        assert_eq!(state.start, Some(15));
+        assert_eq!(state.end, Some(30));
+    }
+
+    #[test]
+    fn test_selection_state_clear() {
+        let mut state = SelectionState::new();
+        state.start = Some(10);
+        state.end = Some(20);
+        state.is_dragging = true;
+        state.drag_start_frame = Some(10);
+
+        state.clear();
+        assert!(state.start.is_none());
+        assert!(state.end.is_none());
+        assert!(!state.is_dragging);
+        assert!(state.drag_start_frame.is_none());
+    }
+
+    #[test]
+    fn test_selection_state_reset() {
+        let mut state = SelectionState::new();
+        state.start = Some(10);
+        state.end = Some(20);
+
+        state.reset();
+        assert!(!state.has_selection());
     }
 }

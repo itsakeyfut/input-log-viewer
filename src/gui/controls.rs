@@ -48,6 +48,10 @@ pub enum ControlAction {
     SetZoom(u64),
     /// Toggle auto-scroll (keep current frame visible during playback)
     ToggleAutoScroll,
+    /// Toggle loop selection mode (loop playback within selected range)
+    ToggleLoopSelection,
+    /// Clear the current selection
+    ClearSelection,
 }
 
 /// Renders playback controls and returns any actions triggered by user interaction.
@@ -76,10 +80,15 @@ pub struct ControlsRenderer<'a> {
     zoom_input: &'a mut u64,
     /// Whether auto-scroll is enabled
     auto_scroll: bool,
+    /// Current selection range (start, end) if any
+    selection: Option<(u64, u64)>,
+    /// Whether loop selection is enabled
+    loop_selection: bool,
 }
 
 impl<'a> ControlsRenderer<'a> {
     /// Create a new controls renderer.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         enabled: bool,
         is_playing: bool,
@@ -90,6 +99,8 @@ impl<'a> ControlsRenderer<'a> {
         visible_frames: u64,
         zoom_input: &'a mut u64,
         auto_scroll: bool,
+        selection: Option<(u64, u64)>,
+        loop_selection: bool,
     ) -> Self {
         // Pre-compute boundary states for button disabling
         let at_start = playback.is_at_start();
@@ -109,6 +120,8 @@ impl<'a> ControlsRenderer<'a> {
             visible_frames,
             zoom_input,
             auto_scroll,
+            selection,
+            loop_selection,
         }
     }
 
@@ -119,6 +132,7 @@ impl<'a> ControlsRenderer<'a> {
         let mut speed_action: Option<ControlAction> = None;
         let mut zoom_action: Option<ControlAction> = None;
         let mut auto_scroll_action: Option<ControlAction> = None;
+        let mut selection_action: Option<ControlAction> = None;
         let mut scrubber_action: Option<ControlAction> = None;
         let mut bookmark_action: Option<ControlAction> = None;
 
@@ -134,6 +148,8 @@ impl<'a> ControlsRenderer<'a> {
                 zoom_action = self.render_zoom_control(ui);
                 ui.separator();
                 auto_scroll_action = self.render_auto_scroll_toggle(ui);
+                ui.separator();
+                selection_action = self.render_selection_controls(ui);
             });
 
             ui.add_space(4.0);
@@ -155,6 +171,7 @@ impl<'a> ControlsRenderer<'a> {
             .or(speed_action)
             .or(zoom_action)
             .or(auto_scroll_action)
+            .or(selection_action)
             .or(scrubber_action)
             .or(bookmark_action)
     }
@@ -327,6 +344,62 @@ impl<'a> ControlsRenderer<'a> {
                 .clicked()
             {
                 action = Some(ControlAction::ToggleAutoScroll);
+            }
+        });
+
+        action
+    }
+
+    /// Render selection controls (loop selection toggle and clear button).
+    fn render_selection_controls(&self, ui: &mut egui::Ui) -> Option<ControlAction> {
+        let mut action: Option<ControlAction> = None;
+        let has_selection = self.selection.is_some();
+
+        ui.add_enabled_ui(self.enabled, |ui| {
+            // Loop Selection toggle button (only enabled when there's a selection)
+            let loop_text = if self.loop_selection {
+                "Loop: Selection"
+            } else {
+                "Loop: All"
+            };
+
+            let loop_button = if self.loop_selection && has_selection {
+                egui::Button::new(
+                    egui::RichText::new(loop_text).color(egui::Color32::from_rgb(180, 100, 220)),
+                )
+            } else if has_selection {
+                egui::Button::new(loop_text)
+            } else {
+                egui::Button::new(egui::RichText::new(loop_text).color(egui::Color32::DARK_GRAY))
+            };
+
+            if ui
+                .add_enabled(has_selection, loop_button)
+                .on_hover_text(if has_selection {
+                    "Toggle looping within selected range"
+                } else {
+                    "Shift+drag on timeline to select a range"
+                })
+                .clicked()
+            {
+                action = Some(ControlAction::ToggleLoopSelection);
+            }
+
+            // Display selection range if any
+            if let Some((start, end)) = self.selection {
+                ui.label(
+                    egui::RichText::new(format!("F{}-F{}", start, end))
+                        .color(egui::Color32::from_rgb(180, 100, 220)),
+                );
+
+                // Clear selection button
+                if ui
+                    .button("✕")
+                    .on_hover_text("Clear selection (Esc)")
+                    .clicked()
+                {
+                    action = Some(ControlAction::ClearSelection);
+                }
             }
         });
 
