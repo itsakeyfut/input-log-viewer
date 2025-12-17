@@ -53,6 +53,12 @@ pub enum ViewAction {
     },
     /// Scroll the timeline view.
     Scroll { scroll_offset: u64 },
+    /// Start a range selection drag at the given frame.
+    StartSelection { frame: u64 },
+    /// Update the range selection during drag.
+    UpdateSelection { frame: u64 },
+    /// Finish the range selection.
+    FinishSelection,
 }
 
 /// Configuration for timeline rendering.
@@ -97,6 +103,10 @@ pub struct TimelineRenderer<'a> {
     search_results: Option<&'a SearchResult>,
     /// Bookmarks to display on the timeline (optional)
     bookmarks: Option<&'a [Bookmark]>,
+    /// Selection range for highlighting (optional)
+    selection: Option<(u64, u64)>,
+    /// Whether a selection drag is currently in progress
+    selection_dragging: bool,
     /// Effective mappings including fallback entries for unmapped IDs
     effective_mappings: Vec<InputMapping>,
     /// Visible mappings based on current filter (indices into effective_mappings)
@@ -150,6 +160,8 @@ impl<'a> TimelineRenderer<'a> {
             filter,
             search_results: None,
             bookmarks: None,
+            selection: None,
+            selection_dragging: false,
             effective_mappings,
             visible_mapping_indices,
             id_to_row,
@@ -166,6 +178,13 @@ impl<'a> TimelineRenderer<'a> {
     /// Set bookmarks for displaying on the timeline.
     pub fn with_bookmarks(mut self, bookmarks: &'a [Bookmark]) -> Self {
         self.bookmarks = Some(bookmarks);
+        self
+    }
+
+    /// Set selection range for highlighting.
+    pub fn with_selection(mut self, selection: Option<(u64, u64)>, is_dragging: bool) -> Self {
+        self.selection = selection;
+        self.selection_dragging = is_dragging;
         self
     }
 
@@ -230,6 +249,7 @@ impl<'a> TimelineRenderer<'a> {
         self.draw_frame_header(&painter, content_rect, timeline_rect);
         self.draw_row_labels(&painter, content_rect, num_rows);
         self.draw_grid(&painter, content_rect, timeline_rect, num_rows);
+        self.draw_selection_highlight(&painter, content_rect, timeline_rect);
         self.draw_search_highlights(&painter, content_rect, timeline_rect);
         self.draw_bookmark_markers(&painter, rect, timeline_rect);
         self.draw_events(&painter, timeline_rect);
@@ -238,7 +258,7 @@ impl<'a> TimelineRenderer<'a> {
         self.draw_button_state_legend(&painter, legend_area_rect);
         self.draw_zoom_indicator(&painter, legend_area_rect);
 
-        // Handle mouse interactions (scroll, zoom, scrollbar drag)
+        // Handle mouse interactions (scroll, zoom, scrollbar drag, selection)
         self.handle_mouse_interaction(ui, &response, timeline_rect, scrollbar_rect)
     }
 
@@ -257,8 +277,8 @@ impl<'a> TimelineRenderer<'a> {
             return Some(action);
         }
 
-        // Handle timeline drag-to-pan
-        if let Some(action) = self.handle_timeline_drag(response, timeline_rect) {
+        // Handle timeline drag-to-pan or Shift+drag for selection
+        if let Some(action) = self.handle_timeline_drag(ui, response, timeline_rect) {
             return Some(action);
         }
 
@@ -344,11 +364,23 @@ impl<'a> TimelineRenderer<'a> {
     }
 
     /// Handle drag-to-pan interaction on the timeline area.
+    /// Without Shift: pans the timeline.
+    /// With Shift: selects a range.
     fn handle_timeline_drag(
         &self,
+        ui: &egui::Ui,
         response: &egui::Response,
         timeline_rect: Rect,
     ) -> Option<ViewAction> {
+        let ctx = ui.ctx();
+        let shift_held = ctx.input(|i| i.modifiers.shift);
+
+        // Handle Shift+drag for selection
+        if shift_held {
+            return self.handle_selection_drag(response, timeline_rect);
+        }
+
+        // Handle regular drag for panning
         if !response.dragged() {
             return None;
         }
@@ -387,6 +419,51 @@ impl<'a> TimelineRenderer<'a> {
         Some(ViewAction::Scroll {
             scroll_offset: new_scroll_offset,
         })
+    }
+
+    /// Handle Shift+drag for range selection.
+    fn handle_selection_drag(
+        &self,
+        response: &egui::Response,
+        timeline_rect: Rect,
+    ) -> Option<ViewAction> {
+        let frame_width = timeline_rect.width() / self.config.visible_frames as f32;
+
+        // Helper to convert x position to frame number
+        let x_to_frame = |x: f32| -> u64 {
+            let relative_x = (x - timeline_rect.left()).max(0.0);
+            let frame_offset = (relative_x / frame_width) as u64;
+            let frame = self.config.scroll_offset.saturating_add(frame_offset);
+            frame.min(self.config.total_frames.saturating_sub(1))
+        };
+
+        // Check if drag started in timeline area
+        let drag_origin = response.interact_pointer_pos()?;
+        if !timeline_rect.contains(drag_origin) {
+            return None;
+        }
+
+        // Handle drag start (first frame of drag)
+        if response.drag_started() {
+            let start_frame = x_to_frame(drag_origin.x);
+            return Some(ViewAction::StartSelection { frame: start_frame });
+        }
+
+        // Handle ongoing drag
+        if response.dragged() {
+            let current_pos = response.interact_pointer_pos()?;
+            let current_frame = x_to_frame(current_pos.x);
+            return Some(ViewAction::UpdateSelection {
+                frame: current_frame,
+            });
+        }
+
+        // Handle drag release
+        if response.drag_stopped() {
+            return Some(ViewAction::FinishSelection);
+        }
+
+        None
     }
 
     /// Handle zoom interaction from Ctrl+scroll.
@@ -896,6 +973,102 @@ impl<'a> TimelineRenderer<'a> {
             dot_radius,
             color.gamma_multiply(intensity),
         );
+    }
+
+    /// Draw highlight for selected frame range.
+    fn draw_selection_highlight(&self, painter: &Painter, rect: Rect, timeline_rect: Rect) {
+        let (sel_start, sel_end) = match self.selection {
+            Some((start, end)) => (start, end),
+            None => return,
+        };
+
+        let view_start = self.config.scroll_offset;
+        let view_end = view_start + self.config.visible_frames;
+        let frame_width = timeline_rect.width() / self.config.visible_frames as f32;
+
+        // Check if selection overlaps with visible range
+        if sel_end < view_start || sel_start >= view_end {
+            return;
+        }
+
+        // Clamp selection to visible range
+        let visible_sel_start = sel_start.max(view_start);
+        let visible_sel_end = sel_end.min(view_end.saturating_sub(1));
+
+        // Calculate x positions
+        let x_start =
+            timeline_rect.left() + ((visible_sel_start - view_start) as f32 * frame_width);
+        let x_end =
+            timeline_rect.left() + ((visible_sel_end - view_start + 1) as f32 * frame_width);
+
+        // Selection colors - use a distinct color (purple/magenta) to differentiate from search
+        let (fill_color, stroke_color) = if self.selection_dragging {
+            // Lighter color while dragging
+            (
+                Color32::from_rgba_unmultiplied(180, 100, 220, 30),
+                Color32::from_rgba_unmultiplied(180, 100, 220, 100),
+            )
+        } else {
+            // Solid color when selection is complete
+            (
+                Color32::from_rgba_unmultiplied(150, 80, 200, 40),
+                Color32::from_rgba_unmultiplied(150, 80, 200, 150),
+            )
+        };
+
+        // Draw the selection highlight rectangle
+        let highlight_rect = Rect::from_min_max(
+            Pos2::new(x_start, rect.top() + HEADER_HEIGHT),
+            Pos2::new(x_end, timeline_rect.bottom()),
+        );
+        painter.rect_filled(highlight_rect, 0.0, fill_color);
+        painter.rect_stroke(
+            highlight_rect,
+            0.0,
+            Stroke::new(2.0, stroke_color),
+            egui::StrokeKind::Inside,
+        );
+
+        // Draw selection range text in the header area
+        let selection_text = format!("F{}-F{}", sel_start, sel_end);
+        let text_x = (x_start + x_end) / 2.0;
+        let text_y = rect.top() + HEADER_HEIGHT / 2.0;
+
+        // Only draw text if there's enough space
+        if x_end - x_start > 40.0 {
+            painter.text(
+                Pos2::new(text_x, text_y),
+                egui::Align2::CENTER_CENTER,
+                selection_text,
+                egui::FontId::proportional(10.0),
+                Color32::from_rgb(180, 100, 220),
+            );
+        }
+
+        // Draw edge markers at selection boundaries
+        let marker_color = Color32::from_rgb(150, 80, 200);
+
+        // Left edge marker
+        if visible_sel_start == sel_start && x_start >= timeline_rect.left() {
+            painter.line_segment(
+                [
+                    Pos2::new(x_start, rect.top()),
+                    Pos2::new(x_start, timeline_rect.bottom()),
+                ],
+                Stroke::new(2.0, marker_color),
+            );
+        }
+
+        // Right edge marker
+        if visible_sel_end == sel_end && x_end <= timeline_rect.right() {
+            painter.line_segment(
+                [
+                    Pos2::new(x_end, rect.top()),
+                    Pos2::new(x_end, timeline_rect.bottom()),
+                ],
+                Stroke::new(2.0, marker_color),
+            );
+        }
     }
 
     /// Draw highlights for search result frames.
