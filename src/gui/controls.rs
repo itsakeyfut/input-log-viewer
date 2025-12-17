@@ -7,6 +7,7 @@ use eframe::egui;
 
 use crate::core::log::Bookmark;
 use crate::core::playback::{PlaybackState, SPEED_OPTIONS};
+use crate::gui::timeline::{MAX_VISIBLE_FRAMES, MIN_VISIBLE_FRAMES};
 
 /// User actions that can be triggered from the controls panel.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +44,8 @@ pub enum ControlAction {
     /// Add bookmark with label at current frame (for future bookmark panel)
     #[allow(dead_code)]
     AddBookmarkWithLabel(String),
+    /// Set zoom level (visible frames)
+    SetZoom(u64),
 }
 
 /// Renders playback controls and returns any actions triggered by user interaction.
@@ -65,6 +68,10 @@ pub struct ControlsRenderer<'a> {
     bookmarks: &'a [Bookmark],
     /// Whether the current frame has a bookmark
     has_bookmark_at_current: bool,
+    /// Current visible frames (zoom level)
+    visible_frames: u64,
+    /// Mutable zoom value for inline editing
+    zoom_input: &'a mut u64,
 }
 
 impl<'a> ControlsRenderer<'a> {
@@ -76,6 +83,8 @@ impl<'a> ControlsRenderer<'a> {
         total_frames: u64,
         frame_input: &'a mut u64,
         bookmarks: &'a [Bookmark],
+        visible_frames: u64,
+        zoom_input: &'a mut u64,
     ) -> Self {
         // Pre-compute boundary states for button disabling
         let at_start = playback.is_at_start();
@@ -92,6 +101,8 @@ impl<'a> ControlsRenderer<'a> {
             frame_input,
             bookmarks,
             has_bookmark_at_current,
+            visible_frames,
+            zoom_input,
         }
     }
 
@@ -100,6 +111,7 @@ impl<'a> ControlsRenderer<'a> {
         let mut nav_action: Option<ControlAction> = None;
         let mut frame_action: Option<ControlAction> = None;
         let mut speed_action: Option<ControlAction> = None;
+        let mut zoom_action: Option<ControlAction> = None;
         let mut scrubber_action: Option<ControlAction> = None;
         let mut bookmark_action: Option<ControlAction> = None;
 
@@ -111,6 +123,8 @@ impl<'a> ControlsRenderer<'a> {
                 frame_action = self.render_frame_counter(ui);
                 ui.separator();
                 speed_action = self.render_speed_control(ui);
+                ui.separator();
+                zoom_action = self.render_zoom_control(ui);
             });
 
             ui.add_space(4.0);
@@ -130,6 +144,7 @@ impl<'a> ControlsRenderer<'a> {
         nav_action
             .or(frame_action)
             .or(speed_action)
+            .or(zoom_action)
             .or(scrubber_action)
             .or(bookmark_action)
     }
@@ -246,6 +261,32 @@ impl<'a> ControlsRenderer<'a> {
                         }
                     }
                 });
+        });
+
+        action
+    }
+
+    /// Render zoom control with editable input.
+    fn render_zoom_control(&mut self, ui: &mut egui::Ui) -> Option<ControlAction> {
+        let mut action: Option<ControlAction> = None;
+
+        ui.add_enabled_ui(self.enabled, |ui| {
+            ui.label("Zoom:");
+
+            // Sync zoom_input with current visible frames
+            *self.zoom_input = self.visible_frames;
+
+            let response = ui.add(
+                egui::DragValue::new(self.zoom_input)
+                    .range(MIN_VISIBLE_FRAMES..=MAX_VISIBLE_FRAMES)
+                    .speed(1.0)
+                    .suffix(" frames"),
+            );
+
+            // Trigger zoom when value changes (drag or direct input)
+            if response.changed() {
+                action = Some(ControlAction::SetZoom(*self.zoom_input));
+            }
         });
 
         action

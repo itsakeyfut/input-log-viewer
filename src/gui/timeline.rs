@@ -13,6 +13,15 @@ use crate::core::search::SearchResult;
 /// Default number of visible frames in the timeline.
 pub const DEFAULT_VISIBLE_FRAMES: u64 = 100;
 
+/// Minimum number of visible frames (maximum zoom in).
+pub const MIN_VISIBLE_FRAMES: u64 = 10;
+
+/// Maximum number of visible frames (maximum zoom out).
+pub const MAX_VISIBLE_FRAMES: u64 = 10000;
+
+/// Zoom factor applied when scrolling (multiplier per scroll step).
+const ZOOM_FACTOR: f32 = 1.15;
+
 /// Height of each input row in pixels.
 const ROW_HEIGHT: f32 = 32.0;
 
@@ -28,6 +37,24 @@ const HEADER_HEIGHT: f32 = 20.0;
 /// Height of the legend area at the bottom.
 const LEGEND_HEIGHT: f32 = 30.0;
 
+/// Height of the scrollbar area.
+const SCROLLBAR_HEIGHT: f32 = 16.0;
+
+/// Scroll speed in frames per scroll step.
+const SCROLL_SPEED: f32 = 10.0;
+
+/// Actions that the timeline can request from the application.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ViewAction {
+    /// Zoom the timeline view.
+    Zoom {
+        visible_frames: u64,
+        scroll_offset: u64,
+    },
+    /// Scroll the timeline view.
+    Scroll { scroll_offset: u64 },
+}
+
 /// Configuration for timeline rendering.
 pub struct TimelineConfig {
     /// First visible frame (for scrolling)
@@ -36,6 +63,8 @@ pub struct TimelineConfig {
     pub visible_frames: u64,
     /// Current frame position (for playback indicator)
     pub current_frame: u64,
+    /// Total number of frames in the log
+    pub total_frames: u64,
 }
 
 impl Default for TimelineConfig {
@@ -44,7 +73,15 @@ impl Default for TimelineConfig {
             scroll_offset: 0,
             visible_frames: DEFAULT_VISIBLE_FRAMES.max(1),
             current_frame: 0,
+            total_frames: 0,
         }
+    }
+}
+
+impl TimelineConfig {
+    /// Calculate the zoom percentage (100% = DEFAULT_VISIBLE_FRAMES).
+    pub fn zoom_percentage(&self) -> f32 {
+        (DEFAULT_VISIBLE_FRAMES as f32 / self.visible_frames as f32) * 100.0
     }
 }
 
@@ -149,36 +186,44 @@ impl<'a> TimelineRenderer<'a> {
     /// Calculate the total height needed for the timeline.
     pub fn calculate_height(&self) -> f32 {
         let num_rows = self.visible_mapping_indices.len().max(1);
-        HEADER_HEIGHT + (num_rows as f32 * ROW_HEIGHT) + LEGEND_HEIGHT
+        HEADER_HEIGHT + (num_rows as f32 * ROW_HEIGHT) + SCROLLBAR_HEIGHT + LEGEND_HEIGHT
     }
 
-    /// Render the complete timeline.
-    pub fn render(&self, ui: &mut egui::Ui) {
+    /// Render the complete timeline and return any view actions triggered by user interaction.
+    pub fn render(&self, ui: &mut egui::Ui) -> Option<ViewAction> {
         let available_size = ui.available_size();
         let num_rows = self.visible_mapping_indices.len().max(1);
         let grid_height = self.calculate_height().min(available_size.y - 10.0);
 
         let (response, painter) = ui.allocate_painter(
             egui::vec2(available_size.x - 10.0, grid_height),
-            egui::Sense::hover(),
+            egui::Sense::click_and_drag(),
         );
 
         let rect = response.rect;
 
-        // Calculate content area (excluding legend area at bottom)
-        let content_bottom = rect.bottom() - LEGEND_HEIGHT;
+        // Calculate layout areas from bottom to top
+        let legend_top = rect.bottom() - LEGEND_HEIGHT;
+        let scrollbar_top = legend_top - SCROLLBAR_HEIGHT;
+        let content_bottom = scrollbar_top;
 
-        // Calculate timeline area (excluding label column and legend area)
+        // Calculate timeline area (excluding label column, scrollbar and legend)
         let timeline_rect = Rect::from_min_max(
             Pos2::new(rect.left() + LABEL_WIDTH, rect.top() + HEADER_HEIGHT),
             Pos2::new(rect.right(), content_bottom),
         );
 
-        // Calculate content rect (full width, excluding legend)
+        // Calculate content rect (full width, excluding scrollbar and legend)
         let content_rect = Rect::from_min_max(rect.min, Pos2::new(rect.right(), content_bottom));
 
+        // Calculate scrollbar area rect
+        let scrollbar_rect = Rect::from_min_max(
+            Pos2::new(rect.left() + LABEL_WIDTH, scrollbar_top),
+            Pos2::new(rect.right(), legend_top),
+        );
+
         // Calculate legend area rect
-        let legend_area_rect = Rect::from_min_max(Pos2::new(rect.left(), content_bottom), rect.max);
+        let legend_area_rect = Rect::from_min_max(Pos2::new(rect.left(), legend_top), rect.max);
 
         // Draw components
         self.draw_background(&painter, rect);
@@ -189,7 +234,226 @@ impl<'a> TimelineRenderer<'a> {
         self.draw_bookmark_markers(&painter, rect, timeline_rect);
         self.draw_events(&painter, timeline_rect);
         self.draw_current_frame_indicator(&painter, content_rect, timeline_rect);
+        self.draw_scrollbar(&painter, scrollbar_rect);
         self.draw_button_state_legend(&painter, legend_area_rect);
+        self.draw_zoom_indicator(&painter, legend_area_rect);
+
+        // Handle mouse interactions (scroll, zoom, scrollbar drag)
+        self.handle_mouse_interaction(ui, &response, timeline_rect, scrollbar_rect)
+    }
+
+    /// Handle mouse interactions: wheel scroll, Ctrl+wheel zoom, and scrollbar drag.
+    fn handle_mouse_interaction(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        timeline_rect: Rect,
+        scrollbar_rect: Rect,
+    ) -> Option<ViewAction> {
+        let ctx = ui.ctx();
+
+        // Handle scrollbar drag
+        if let Some(action) = self.handle_scrollbar_drag(response, scrollbar_rect) {
+            return Some(action);
+        }
+
+        // Check if pointer is over the timeline or scrollbar area
+        let pointer_pos = ctx.input(|i| i.pointer.hover_pos())?;
+        let over_timeline = timeline_rect.contains(pointer_pos);
+        let over_scrollbar = scrollbar_rect.contains(pointer_pos);
+
+        if !over_timeline && !over_scrollbar {
+            return None;
+        }
+
+        // Get scroll delta and modifier state
+        let (scroll_delta_y, scroll_delta_x, ctrl_held, shift_held) = ctx.input(|i| {
+            (
+                i.raw_scroll_delta.y,
+                i.raw_scroll_delta.x,
+                i.modifiers.ctrl,
+                i.modifiers.shift,
+            )
+        });
+
+        // Ctrl+scroll = zoom
+        if ctrl_held && scroll_delta_y != 0.0 {
+            return self.handle_zoom(pointer_pos, scroll_delta_y, timeline_rect);
+        }
+
+        // Regular scroll (vertical or horizontal) = horizontal scroll
+        // Shift+scroll also maps vertical to horizontal
+        let scroll_delta = if shift_held || scroll_delta_x != 0.0 {
+            -scroll_delta_x - scroll_delta_y
+        } else {
+            -scroll_delta_y
+        };
+
+        if scroll_delta != 0.0 {
+            return self.handle_scroll(scroll_delta);
+        }
+
+        None
+    }
+
+    /// Handle scrollbar drag interaction.
+    fn handle_scrollbar_drag(
+        &self,
+        response: &egui::Response,
+        scrollbar_rect: Rect,
+    ) -> Option<ViewAction> {
+        if !response.dragged() {
+            return None;
+        }
+
+        // Check if drag started in scrollbar area
+        let drag_origin = response.interact_pointer_pos()?;
+        if !scrollbar_rect.contains(drag_origin) {
+            return None;
+        }
+
+        // Calculate scroll position from pointer position
+        let pointer_pos = response.interact_pointer_pos()?;
+        let track_width = scrollbar_rect.width();
+        let thumb_width = self.calculate_scrollbar_thumb_width(track_width);
+
+        // Calculate position relative to track, accounting for thumb size
+        let usable_width = track_width - thumb_width;
+        if usable_width <= 0.0 {
+            return None;
+        }
+
+        let relative_x =
+            (pointer_pos.x - scrollbar_rect.left() - thumb_width / 2.0).clamp(0.0, usable_width);
+        let scroll_ratio = relative_x / usable_width;
+
+        let max_scroll = self
+            .config
+            .total_frames
+            .saturating_sub(self.config.visible_frames);
+        let new_scroll_offset = (scroll_ratio * max_scroll as f32) as u64;
+
+        Some(ViewAction::Scroll {
+            scroll_offset: new_scroll_offset.min(max_scroll),
+        })
+    }
+
+    /// Handle zoom interaction from Ctrl+scroll.
+    fn handle_zoom(
+        &self,
+        pointer_pos: Pos2,
+        scroll_delta: f32,
+        timeline_rect: Rect,
+    ) -> Option<ViewAction> {
+        // Calculate zoom factor based on scroll direction
+        let zoom_factor = if scroll_delta > 0.0 {
+            1.0 / ZOOM_FACTOR // Scroll up = zoom in = fewer frames
+        } else {
+            ZOOM_FACTOR // Scroll down = zoom out = more frames
+        };
+
+        // Calculate new visible frames
+        let new_visible_frames = (self.config.visible_frames as f32 * zoom_factor) as u64;
+        let new_visible_frames = new_visible_frames.clamp(MIN_VISIBLE_FRAMES, MAX_VISIBLE_FRAMES);
+
+        // If no change, skip
+        if new_visible_frames == self.config.visible_frames {
+            return None;
+        }
+
+        // Calculate the frame under the mouse cursor before zoom
+        let frame_width = timeline_rect.width() / self.config.visible_frames as f32;
+        let mouse_offset_x = (pointer_pos.x - timeline_rect.left()).max(0.0);
+        let frame_under_mouse = self.config.scroll_offset as f32 + (mouse_offset_x / frame_width);
+
+        // Calculate new frame width after zoom
+        let new_frame_width = timeline_rect.width() / new_visible_frames as f32;
+
+        // Calculate new scroll offset to keep the frame under mouse in the same screen position
+        let new_scroll_offset = frame_under_mouse - (mouse_offset_x / new_frame_width);
+        let new_scroll_offset = new_scroll_offset.max(0.0) as u64;
+
+        // Clamp scroll offset to valid range
+        let max_scroll = self.config.total_frames.saturating_sub(new_visible_frames);
+        let new_scroll_offset = new_scroll_offset.min(max_scroll);
+
+        Some(ViewAction::Zoom {
+            visible_frames: new_visible_frames,
+            scroll_offset: new_scroll_offset,
+        })
+    }
+
+    /// Handle horizontal scroll from mouse wheel.
+    fn handle_scroll(&self, scroll_delta: f32) -> Option<ViewAction> {
+        let scroll_amount = (scroll_delta * SCROLL_SPEED / 10.0) as i64;
+        if scroll_amount == 0 {
+            return None;
+        }
+
+        let current_scroll = self.config.scroll_offset as i64;
+        let new_scroll = current_scroll + scroll_amount;
+        let max_scroll = self
+            .config
+            .total_frames
+            .saturating_sub(self.config.visible_frames) as i64;
+
+        let new_scroll_offset = new_scroll.clamp(0, max_scroll) as u64;
+
+        if new_scroll_offset == self.config.scroll_offset {
+            return None;
+        }
+
+        Some(ViewAction::Scroll {
+            scroll_offset: new_scroll_offset,
+        })
+    }
+
+    /// Calculate scrollbar thumb width based on visible/total frame ratio.
+    fn calculate_scrollbar_thumb_width(&self, track_width: f32) -> f32 {
+        if self.config.total_frames == 0 {
+            return track_width;
+        }
+        let ratio = self.config.visible_frames as f32 / self.config.total_frames as f32;
+        (track_width * ratio).max(20.0).min(track_width)
+    }
+
+    /// Draw the horizontal scrollbar.
+    fn draw_scrollbar(&self, painter: &Painter, scrollbar_rect: Rect) {
+        // Draw track background
+        painter.rect_filled(scrollbar_rect, 2.0, Color32::from_rgb(40, 40, 45));
+
+        // Calculate thumb position and size
+        let track_width = scrollbar_rect.width();
+        let thumb_width = self.calculate_scrollbar_thumb_width(track_width);
+
+        // Calculate thumb position
+        let max_scroll = self
+            .config
+            .total_frames
+            .saturating_sub(self.config.visible_frames);
+        let scroll_ratio = if max_scroll > 0 {
+            self.config.scroll_offset as f32 / max_scroll as f32
+        } else {
+            0.0
+        };
+
+        let usable_width = track_width - thumb_width;
+        let thumb_x = scrollbar_rect.left() + (scroll_ratio * usable_width);
+
+        // Draw thumb
+        let thumb_rect = Rect::from_min_size(
+            Pos2::new(thumb_x, scrollbar_rect.top() + 2.0),
+            egui::vec2(thumb_width, scrollbar_rect.height() - 4.0),
+        );
+        painter.rect_filled(thumb_rect, 4.0, Color32::from_rgb(80, 80, 90));
+
+        // Draw thumb border on hover (simplified - always show slight border)
+        painter.rect_stroke(
+            thumb_rect,
+            4.0,
+            Stroke::new(1.0, Color32::from_rgb(100, 100, 110)),
+            egui::StrokeKind::Inside,
+        );
     }
 
     /// Draw the background and border.
@@ -264,8 +528,12 @@ impl<'a> TimelineRenderer<'a> {
             10
         } else if self.config.visible_frames <= 500 {
             50
-        } else {
+        } else if self.config.visible_frames <= 2000 {
             100
+        } else if self.config.visible_frames <= 5000 {
+            500
+        } else {
+            1000
         }
     }
 
@@ -804,5 +1072,27 @@ impl<'a> TimelineRenderer<'a> {
 
             x += item_width + ITEM_SPACING;
         }
+    }
+
+    /// Draw zoom indicator showing current zoom level and visible frames.
+    fn draw_zoom_indicator(&self, painter: &Painter, legend_area: Rect) {
+        let zoom_pct = self.config.zoom_percentage();
+        let visible = self.config.visible_frames;
+
+        // Format zoom text
+        let zoom_text = format!("Zoom: {:.0}% ({} frames)", zoom_pct, visible);
+
+        // Position at left side of legend area
+        let x = legend_area.left() + 16.0;
+        let y = legend_area.center().y;
+
+        // Draw zoom indicator text
+        painter.text(
+            Pos2::new(x, y),
+            egui::Align2::LEFT_CENTER,
+            zoom_text,
+            egui::FontId::proportional(11.0),
+            Color32::GRAY,
+        );
     }
 }

@@ -13,7 +13,7 @@ use crate::core::playback::PlaybackState;
 use crate::core::search::{SearchQuery, SearchResult, find_matches};
 
 use super::controls::{ControlAction, ControlsRenderer};
-use super::timeline::{TimelineConfig, TimelineRenderer};
+use super::timeline::{TimelineConfig, TimelineRenderer, ViewAction};
 
 /// Error information for the error state.
 #[derive(Debug, Clone, PartialEq)]
@@ -354,6 +354,8 @@ pub struct InputLogViewerApp {
     filter_popup_open: bool,
     /// Frame input value for inline editing in controls
     frame_input_value: u64,
+    /// Zoom input value for inline editing in controls
+    zoom_input_value: u64,
     /// Search state for input search functionality
     search: SearchState,
     /// Bookmark state for managing frame bookmarks
@@ -373,6 +375,7 @@ impl InputLogViewerApp {
             filter: FilterState::new(),
             filter_popup_open: false,
             frame_input_value: 0,
+            zoom_input_value: 100,
             search: SearchState::new(),
             bookmarks: BookmarkState::new(),
         }
@@ -524,6 +527,8 @@ impl eframe::App for InputLogViewerApp {
                         // Playback ended (loop disabled and reached end)
                         self.state = AppState::Ready;
                     }
+                    // Auto-scroll to keep current frame visible
+                    self.ensure_frame_visible(total_frames);
                 }
             }
             // Keep requesting repaints while playing
@@ -544,8 +549,9 @@ impl eframe::App for InputLogViewerApp {
             self.handle_control_action(action, total_frames);
         }
 
-        // Sync playback current_frame with timeline config for rendering
+        // Sync playback and log state with timeline config for rendering
         self.timeline_config.current_frame = self.playback.current_frame;
+        self.timeline_config.total_frames = total_frames;
 
         self.render_toolbar(ctx);
         self.render_controls(ctx);
@@ -1410,6 +1416,8 @@ impl InputLogViewerApp {
         // Capture action from controls renderer
         let mut action: Option<ControlAction> = None;
         let mut frame_input = self.frame_input_value;
+        let mut zoom_input = self.zoom_input_value;
+        let visible_frames = self.timeline_config.visible_frames;
 
         egui::TopBottomPanel::bottom("controls")
             .min_height(80.0)
@@ -1421,15 +1429,39 @@ impl InputLogViewerApp {
                     total_frames,
                     &mut frame_input,
                     &self.bookmarks.bookmarks,
+                    visible_frames,
+                    &mut zoom_input,
                 );
                 action = renderer.render(ui);
             });
 
         self.frame_input_value = frame_input;
+        self.zoom_input_value = zoom_input;
 
         // Handle control actions
         if let Some(action) = action {
             self.handle_control_action(action, total_frames);
+        }
+    }
+
+    /// Ensure the current frame is visible in the timeline.
+    ///
+    /// If the current frame is outside the visible range, scrolls the timeline
+    /// to make it visible. The frame is placed at the left edge of the visible area
+    /// when scrolling forward, leaving room for upcoming frames.
+    fn ensure_frame_visible(&mut self, total_frames: u64) {
+        let current = self.playback.current_frame;
+        let visible = self.timeline_config.visible_frames;
+        let scroll = self.timeline_config.scroll_offset;
+
+        // Check if current frame is outside visible range
+        let visible_end = scroll.saturating_add(visible);
+        if current < scroll || current >= visible_end {
+            // Scroll so current frame is near the left edge (1/4 into the view)
+            let margin = visible / 4;
+            let new_scroll = current.saturating_sub(margin);
+            let max_scroll = total_frames.saturating_sub(visible);
+            self.timeline_config.scroll_offset = new_scroll.min(max_scroll);
         }
     }
 
@@ -1528,6 +1560,14 @@ impl InputLogViewerApp {
                     ));
                 }
             }
+            ControlAction::SetZoom(visible_frames) => {
+                self.timeline_config.visible_frames = visible_frames;
+                // Clamp scroll offset to valid range for new zoom level
+                let max_scroll = total_frames.saturating_sub(visible_frames);
+                if self.timeline_config.scroll_offset > max_scroll {
+                    self.timeline_config.scroll_offset = max_scroll;
+                }
+            }
         }
     }
 
@@ -1591,8 +1631,18 @@ impl InputLogViewerApp {
     }
 
     /// Render the timeline view when a file is loaded.
-    fn render_loaded_timeline(&self, ui: &mut egui::Ui) {
-        if let Some(ref log) = self.log {
+    fn render_loaded_timeline(&mut self, ui: &mut egui::Ui) {
+        // We need to borrow log immutably for metadata display, then handle zoom separately
+        let file_info = self.log.as_ref().map(|log| {
+            (
+                log.metadata.frame_count,
+                log.metadata.target_fps,
+                log.events.len(),
+                log.metadata.source.clone(),
+            )
+        });
+
+        if let Some((frame_count, target_fps, event_count, source)) = file_info {
             // Show file info header
             ui.horizontal(|ui| {
                 ui.heading("📊 Timeline");
@@ -1610,12 +1660,10 @@ impl InputLogViewerApp {
                 ui.separator();
                 ui.label(format!(
                     "Frames: {} | FPS: {} | Events: {}",
-                    log.metadata.frame_count,
-                    log.metadata.target_fps,
-                    log.events.len()
+                    frame_count, target_fps, event_count
                 ));
 
-                if let Some(ref source) = log.metadata.source {
+                if let Some(ref source) = source {
                     ui.separator();
                     ui.label(format!("Source: {}", source));
                 }
@@ -1623,8 +1671,11 @@ impl InputLogViewerApp {
 
             ui.separator();
             ui.add_space(5.0);
+        }
 
-            // Render the timeline using TimelineRenderer with filter, search results, and bookmarks
+        // Render the timeline using TimelineRenderer with filter, search results, and bookmarks
+        // Handle zoom action if triggered
+        let view_action = if let Some(ref log) = self.log {
             let mut renderer = TimelineRenderer::new(log, &self.timeline_config, &self.filter);
             if self.search.has_searched && !self.search.results.is_empty() {
                 renderer = renderer.with_search_results(&self.search.results);
@@ -1632,7 +1683,24 @@ impl InputLogViewerApp {
             if !self.bookmarks.is_empty() {
                 renderer = renderer.with_bookmarks(&self.bookmarks.bookmarks);
             }
-            renderer.render(ui);
+            renderer.render(ui)
+        } else {
+            None
+        };
+
+        // Apply view action after rendering (outside the borrow)
+        match view_action {
+            Some(ViewAction::Zoom {
+                visible_frames,
+                scroll_offset,
+            }) => {
+                self.timeline_config.visible_frames = visible_frames;
+                self.timeline_config.scroll_offset = scroll_offset;
+            }
+            Some(ViewAction::Scroll { scroll_offset }) => {
+                self.timeline_config.scroll_offset = scroll_offset;
+            }
+            None => {}
         }
     }
 
