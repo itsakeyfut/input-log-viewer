@@ -7,7 +7,7 @@ use eframe::egui;
 use std::path::PathBuf;
 
 use crate::core::filter::FilterState;
-use crate::core::log::{ButtonState, InputKind, InputLog};
+use crate::core::log::{Bookmark, ButtonState, InputKind, InputLog};
 use crate::core::parser;
 use crate::core::playback::PlaybackState;
 use crate::core::search::{SearchQuery, SearchResult, find_matches};
@@ -167,6 +167,173 @@ impl SearchState {
     }
 }
 
+/// State for managing bookmarks during a session.
+#[derive(Debug, Clone, Default)]
+pub struct BookmarkState {
+    /// List of bookmarks (sorted by frame)
+    pub bookmarks: Vec<Bookmark>,
+    /// Whether the bookmarks panel is currently open
+    pub panel_open: bool,
+    /// Label input for adding a new bookmark
+    pub label_input: String,
+    /// Index of the bookmark currently being edited (for label editing)
+    pub editing_index: Option<usize>,
+    /// Temporary label buffer for editing
+    pub editing_label: String,
+}
+
+impl BookmarkState {
+    /// Create a new bookmark state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset the bookmark state when a new file is loaded.
+    pub fn reset(&mut self) {
+        self.bookmarks.clear();
+        self.label_input.clear();
+        self.editing_index = None;
+        self.editing_label.clear();
+        // Keep panel_open unchanged so user can continue working
+    }
+
+    /// Add a bookmark at the specified frame.
+    /// If a bookmark already exists at that frame, returns false.
+    pub fn add_bookmark(&mut self, frame: u64, label: Option<String>) -> bool {
+        // Check if bookmark already exists at this frame
+        if self.bookmarks.iter().any(|b| b.frame == frame) {
+            return false;
+        }
+
+        self.bookmarks.push(Bookmark { frame, label });
+        // Keep bookmarks sorted by frame
+        self.bookmarks.sort_by_key(|b| b.frame);
+        true
+    }
+
+    /// Remove a bookmark at the specified frame.
+    /// Returns true if a bookmark was removed.
+    pub fn remove_bookmark(&mut self, frame: u64) -> bool {
+        let initial_len = self.bookmarks.len();
+        self.bookmarks.retain(|b| b.frame != frame);
+        self.bookmarks.len() < initial_len
+    }
+
+    /// Toggle a bookmark at the specified frame.
+    /// Returns (added: bool, removed: bool).
+    pub fn toggle_bookmark(&mut self, frame: u64) -> (bool, bool) {
+        if self.remove_bookmark(frame) {
+            (false, true)
+        } else {
+            self.add_bookmark(frame, None);
+            (true, false)
+        }
+    }
+
+    /// Check if a bookmark exists at the specified frame.
+    #[allow(dead_code)]
+    pub fn has_bookmark_at(&self, frame: u64) -> bool {
+        self.bookmarks.iter().any(|b| b.frame == frame)
+    }
+
+    /// Get the next bookmark frame after the current frame.
+    /// Wraps around to the first bookmark if at the end.
+    pub fn get_next_bookmark(&self, current_frame: u64) -> Option<u64> {
+        if self.bookmarks.is_empty() {
+            return None;
+        }
+
+        // Find the first bookmark after current frame
+        for bookmark in &self.bookmarks {
+            if bookmark.frame > current_frame {
+                return Some(bookmark.frame);
+            }
+        }
+
+        // Wrap around to the first bookmark
+        Some(self.bookmarks[0].frame)
+    }
+
+    /// Get the previous bookmark frame before the current frame.
+    /// Wraps around to the last bookmark if at the beginning.
+    pub fn get_previous_bookmark(&self, current_frame: u64) -> Option<u64> {
+        if self.bookmarks.is_empty() {
+            return None;
+        }
+
+        // Find the last bookmark before current frame
+        for bookmark in self.bookmarks.iter().rev() {
+            if bookmark.frame < current_frame {
+                return Some(bookmark.frame);
+            }
+        }
+
+        // Wrap around to the last bookmark
+        Some(self.bookmarks.last().unwrap().frame)
+    }
+
+    /// Get bookmark at specified index.
+    pub fn get_bookmark(&self, index: usize) -> Option<&Bookmark> {
+        self.bookmarks.get(index)
+    }
+
+    /// Get bookmark count.
+    #[allow(dead_code)]
+    pub fn count(&self) -> usize {
+        self.bookmarks.len()
+    }
+
+    /// Check if there are any bookmarks.
+    pub fn is_empty(&self) -> bool {
+        self.bookmarks.is_empty()
+    }
+
+    /// Update the label of a bookmark at the given index.
+    pub fn update_bookmark_label(&mut self, index: usize, label: String) -> bool {
+        if let Some(bookmark) = self.bookmarks.get_mut(index) {
+            bookmark.label = if label.is_empty() { None } else { Some(label) };
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove a bookmark by index.
+    pub fn remove_bookmark_by_index(&mut self, index: usize) -> Option<u64> {
+        if index < self.bookmarks.len() {
+            let frame = self.bookmarks[index].frame;
+            self.bookmarks.remove(index);
+            Some(frame)
+        } else {
+            None
+        }
+    }
+
+    /// Start editing a bookmark's label.
+    pub fn start_editing(&mut self, index: usize) {
+        if let Some(bookmark) = self.bookmarks.get(index) {
+            self.editing_index = Some(index);
+            self.editing_label = bookmark.label.clone().unwrap_or_default();
+        }
+    }
+
+    /// Finish editing and save the label.
+    pub fn finish_editing(&mut self) -> bool {
+        if let Some(index) = self.editing_index.take() {
+            let label = std::mem::take(&mut self.editing_label);
+            self.update_bookmark_label(index, label)
+        } else {
+            false
+        }
+    }
+
+    /// Cancel editing without saving.
+    pub fn cancel_editing(&mut self) {
+        self.editing_index = None;
+        self.editing_label.clear();
+    }
+}
+
 /// Main application state and GUI logic.
 pub struct InputLogViewerApp {
     /// Current application state
@@ -189,6 +356,8 @@ pub struct InputLogViewerApp {
     frame_input_value: u64,
     /// Search state for input search functionality
     search: SearchState,
+    /// Bookmark state for managing frame bookmarks
+    bookmarks: BookmarkState,
 }
 
 impl InputLogViewerApp {
@@ -205,6 +374,7 @@ impl InputLogViewerApp {
             filter_popup_open: false,
             frame_input_value: 0,
             search: SearchState::new(),
+            bookmarks: BookmarkState::new(),
         }
     }
 
@@ -263,6 +433,8 @@ impl InputLogViewerApp {
                 self.filter.initialize_from_log(&log);
                 // Reset search state for new file
                 self.search.reset();
+                // Reset bookmarks for new file
+                self.bookmarks.reset();
                 self.log = Some(log);
                 self.loaded_file_path = Some(path.clone());
                 self.state = AppState::Ready;
@@ -386,6 +558,11 @@ impl InputLogViewerApp {
                 return Some(ControlAction::GoToEnd);
             }
 
+            // B: Toggle bookmark at current frame
+            if i.key_pressed(egui::Key::B) {
+                return Some(ControlAction::ToggleBookmark);
+            }
+
             None
         })
     }
@@ -442,6 +619,25 @@ impl InputLogViewerApp {
                     }
                 });
 
+                ui.separator();
+
+                // Bookmarks button (enabled only when file is loaded)
+                ui.add_enabled_ui(toolbar_enabled, |ui| {
+                    let bookmarks_button_text = if self.bookmarks.panel_open {
+                        "★ Bookmarks ▲"
+                    } else {
+                        "★ Bookmarks ▼"
+                    };
+                    if ui.button(bookmarks_button_text).clicked() {
+                        self.bookmarks.panel_open = !self.bookmarks.panel_open;
+                    }
+
+                    // Show bookmark count indicator
+                    if !self.bookmarks.is_empty() {
+                        ui.label(format!("({})", self.bookmarks.bookmarks.len()));
+                    }
+                });
+
                 // Show status message in toolbar (right-aligned)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.render_status_message(ui);
@@ -457,6 +653,11 @@ impl InputLogViewerApp {
         // Render search dialog if open
         if self.search.dialog_open && toolbar_enabled {
             self.render_search_dialog(ctx);
+        }
+
+        // Render bookmarks panel if open
+        if self.bookmarks.panel_open && toolbar_enabled {
+            self.render_bookmarks_panel(ctx);
         }
     }
 
@@ -742,6 +943,244 @@ impl InputLogViewerApp {
         }
     }
 
+    /// Render the bookmarks panel window.
+    fn render_bookmarks_panel(&mut self, ctx: &egui::Context) {
+        let mut should_close = false;
+        let mut seek_to_frame: Option<u64> = None;
+        let mut remove_index: Option<usize> = None;
+        let mut add_bookmark_at_current = false;
+
+        let total_frames = self
+            .log
+            .as_ref()
+            .map(|l| l.metadata.frame_count)
+            .unwrap_or(0);
+        let current_frame = self.playback.current_frame;
+
+        egui::Window::new("Bookmarks")
+            .id(egui::Id::new("bookmarks_panel"))
+            .collapsible(false)
+            .resizable(true)
+            .default_width(320.0)
+            .default_height(300.0)
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 40.0))
+            .show(ctx, |ui| {
+                // Header with close button
+                ui.horizontal(|ui| {
+                    ui.heading("★ Bookmarks");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("✕").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+                ui.separator();
+
+                // Add bookmark section
+                ui.horizontal(|ui| {
+                    ui.label("Label:");
+                    let response = ui.text_edit_singleline(&mut self.bookmarks.label_input);
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        add_bookmark_at_current = true;
+                    }
+                    if ui.button("Add at F").clicked() {
+                        add_bookmark_at_current = true;
+                    }
+                    ui.label(format!("{}", current_frame));
+                });
+
+                ui.add_space(4.0);
+
+                // Quick info
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "Current frame: {} | Total bookmarks: {}",
+                        current_frame,
+                        self.bookmarks.bookmarks.len()
+                    ));
+                });
+
+                ui.separator();
+
+                // Bookmark list
+                if self.bookmarks.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(20.0);
+                        ui.label("No bookmarks yet.");
+                        ui.label("Press 'B' or click 'Add' to create one.");
+                        ui.add_space(20.0);
+                    });
+                } else {
+                    let mut start_editing_index: Option<usize> = None;
+                    let mut finish_editing = false;
+                    let mut cancel_editing = false;
+
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for i in 0..self.bookmarks.bookmarks.len() {
+                                // Copy needed data to avoid borrow issues
+                                let frame = self.bookmarks.bookmarks[i].frame;
+                                let label = self.bookmarks.bookmarks[i].label.clone();
+                                let is_current = frame == current_frame;
+                                let is_editing = self.bookmarks.editing_index == Some(i);
+
+                                ui.horizontal(|ui| {
+                                    // Frame indicator (clickable to jump)
+                                    let frame_text = format!("★ F{}", frame);
+                                    let frame_button = if is_current {
+                                        egui::Button::new(
+                                            egui::RichText::new(&frame_text)
+                                                .color(egui::Color32::from_rgb(255, 200, 100))
+                                                .strong(),
+                                        )
+                                    } else {
+                                        egui::Button::new(&frame_text)
+                                    };
+
+                                    if ui
+                                        .add(frame_button)
+                                        .on_hover_text("Click to jump")
+                                        .clicked()
+                                    {
+                                        seek_to_frame = Some(frame);
+                                    }
+
+                                    ui.separator();
+
+                                    // Label display/edit
+                                    if is_editing {
+                                        // Editing mode
+                                        let response = ui.text_edit_singleline(
+                                            &mut self.bookmarks.editing_label,
+                                        );
+                                        if response.lost_focus() {
+                                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                                finish_editing = true;
+                                            } else if ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                            {
+                                                cancel_editing = true;
+                                            }
+                                        }
+                                        if ui.button("✓").on_hover_text("Save").clicked() {
+                                            finish_editing = true;
+                                        }
+                                        if ui.button("✕").on_hover_text("Cancel").clicked() {
+                                            cancel_editing = true;
+                                        }
+                                    } else {
+                                        // Display mode
+                                        let label_text = label.as_deref().unwrap_or("(no label)");
+                                        let label_color = if label.is_some() {
+                                            egui::Color32::LIGHT_GRAY
+                                        } else {
+                                            egui::Color32::DARK_GRAY
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(label_text).color(label_color),
+                                        );
+
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                // Delete button
+                                                if ui
+                                                    .button("🗑")
+                                                    .on_hover_text("Delete bookmark")
+                                                    .clicked()
+                                                {
+                                                    remove_index = Some(i);
+                                                }
+                                                // Edit button
+                                                if ui
+                                                    .button("✏")
+                                                    .on_hover_text("Edit label")
+                                                    .clicked()
+                                                {
+                                                    start_editing_index = Some(i);
+                                                }
+                                            },
+                                        );
+                                    }
+                                });
+
+                                ui.add_space(2.0);
+                            }
+                        });
+
+                    // Apply deferred actions
+                    if let Some(idx) = start_editing_index {
+                        self.bookmarks.start_editing(idx);
+                    }
+                    if finish_editing {
+                        self.bookmarks.finish_editing();
+                    }
+                    if cancel_editing {
+                        self.bookmarks.cancel_editing();
+                    }
+                }
+
+                ui.separator();
+
+                // Bottom actions
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!self.bookmarks.is_empty(), egui::Button::new("Clear All"))
+                        .clicked()
+                    {
+                        self.bookmarks.bookmarks.clear();
+                        self.status_message = Some(StatusMessage::new(
+                            "All bookmarks cleared",
+                            StatusKind::Success,
+                        ));
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label("Tip: Press 'B' to quickly toggle bookmarks");
+                    });
+                });
+            });
+
+        if should_close {
+            self.bookmarks.panel_open = false;
+        }
+
+        // Handle bookmark addition
+        if add_bookmark_at_current {
+            let label = if self.bookmarks.label_input.is_empty() {
+                None
+            } else {
+                Some(std::mem::take(&mut self.bookmarks.label_input))
+            };
+            if self.bookmarks.add_bookmark(current_frame, label) {
+                self.status_message = Some(StatusMessage::new(
+                    format!("Bookmark added at frame {}", current_frame),
+                    StatusKind::Success,
+                ));
+            } else {
+                self.status_message = Some(StatusMessage::new(
+                    format!("Bookmark already exists at frame {}", current_frame),
+                    StatusKind::Error,
+                ));
+            }
+        }
+
+        // Handle bookmark removal
+        if let Some(index) = remove_index
+            && let Some(frame) = self.bookmarks.remove_bookmark_by_index(index)
+        {
+            self.status_message = Some(StatusMessage::new(
+                format!("Bookmark removed at frame {}", frame),
+                StatusKind::Success,
+            ));
+        }
+
+        // Handle seeking
+        if let Some(frame) = seek_to_frame {
+            self.playback.set_frame(frame, total_frames);
+        }
+    }
+
     /// Execute the search based on current search state.
     fn perform_search(&mut self) {
         if let Some(ref log) = self.log {
@@ -858,6 +1297,7 @@ impl InputLogViewerApp {
                     &self.playback,
                     total_frames,
                     &mut frame_input,
+                    &self.bookmarks.bookmarks,
                 );
                 action = renderer.render(ui);
             });
@@ -900,6 +1340,62 @@ impl InputLogViewerApp {
             }
             ControlAction::SeekToFrame(frame) => {
                 self.playback.set_frame(frame, total_frames);
+            }
+            ControlAction::ToggleBookmark => {
+                let current_frame = self.playback.current_frame;
+                let (added, removed) = self.bookmarks.toggle_bookmark(current_frame);
+                if added {
+                    self.status_message = Some(StatusMessage::new(
+                        format!("Bookmark added at frame {}", current_frame),
+                        StatusKind::Success,
+                    ));
+                } else if removed {
+                    self.status_message = Some(StatusMessage::new(
+                        format!("Bookmark removed at frame {}", current_frame),
+                        StatusKind::Success,
+                    ));
+                }
+            }
+            ControlAction::NextBookmark => {
+                if let Some(frame) = self
+                    .bookmarks
+                    .get_next_bookmark(self.playback.current_frame)
+                {
+                    self.playback.set_frame(frame, total_frames);
+                }
+            }
+            ControlAction::PreviousBookmark => {
+                if let Some(frame) = self
+                    .bookmarks
+                    .get_previous_bookmark(self.playback.current_frame)
+                {
+                    self.playback.set_frame(frame, total_frames);
+                }
+            }
+            ControlAction::JumpToBookmark(index) => {
+                if let Some(bookmark) = self.bookmarks.get_bookmark(index) {
+                    self.playback.set_frame(bookmark.frame, total_frames);
+                }
+            }
+            ControlAction::RemoveBookmark(index) => {
+                if let Some(bookmark) = self.bookmarks.get_bookmark(index) {
+                    let frame = bookmark.frame;
+                    self.bookmarks.remove_bookmark(frame);
+                    self.status_message = Some(StatusMessage::new(
+                        format!("Bookmark removed at frame {}", frame),
+                        StatusKind::Success,
+                    ));
+                }
+            }
+            ControlAction::AddBookmarkWithLabel(label) => {
+                let current_frame = self.playback.current_frame;
+                let label = if label.is_empty() { None } else { Some(label) };
+                if self.bookmarks.add_bookmark(current_frame, label) {
+                    self.status_message = Some(StatusMessage::new(
+                        format!("Bookmark added at frame {}", current_frame),
+                        StatusKind::Success,
+                    ));
+                }
             }
         }
     }
@@ -997,10 +1493,13 @@ impl InputLogViewerApp {
             ui.separator();
             ui.add_space(5.0);
 
-            // Render the timeline using TimelineRenderer with filter and search results
+            // Render the timeline using TimelineRenderer with filter, search results, and bookmarks
             let mut renderer = TimelineRenderer::new(log, &self.timeline_config, &self.filter);
             if self.search.has_searched && !self.search.results.is_empty() {
                 renderer = renderer.with_search_results(&self.search.results);
+            }
+            if !self.bookmarks.is_empty() {
+                renderer = renderer.with_bookmarks(&self.bookmarks.bookmarks);
             }
             renderer.render(ui);
         }
@@ -1070,5 +1569,264 @@ impl InputLogViewerApp {
             egui::FontId::proportional(16.0),
             egui::Color32::DARK_GRAY,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bookmark_state_new() {
+        let state = BookmarkState::new();
+        assert!(state.bookmarks.is_empty());
+        assert!(!state.panel_open);
+        assert!(state.label_input.is_empty());
+    }
+
+    #[test]
+    fn test_bookmark_state_add() {
+        let mut state = BookmarkState::new();
+
+        // Add first bookmark
+        assert!(state.add_bookmark(10, None));
+        assert_eq!(state.bookmarks.len(), 1);
+        assert_eq!(state.bookmarks[0].frame, 10);
+        assert!(state.bookmarks[0].label.is_none());
+
+        // Add second bookmark with label
+        assert!(state.add_bookmark(20, Some("Test".to_string())));
+        assert_eq!(state.bookmarks.len(), 2);
+        assert_eq!(state.bookmarks[1].frame, 20);
+        assert_eq!(state.bookmarks[1].label, Some("Test".to_string()));
+
+        // Adding duplicate frame should fail
+        assert!(!state.add_bookmark(10, Some("Duplicate".to_string())));
+        assert_eq!(state.bookmarks.len(), 2);
+    }
+
+    #[test]
+    fn test_bookmark_state_add_maintains_sort_order() {
+        let mut state = BookmarkState::new();
+
+        state.add_bookmark(30, None);
+        state.add_bookmark(10, None);
+        state.add_bookmark(20, None);
+
+        // Should be sorted by frame
+        assert_eq!(state.bookmarks[0].frame, 10);
+        assert_eq!(state.bookmarks[1].frame, 20);
+        assert_eq!(state.bookmarks[2].frame, 30);
+    }
+
+    #[test]
+    fn test_bookmark_state_remove() {
+        let mut state = BookmarkState::new();
+        state.add_bookmark(10, None);
+        state.add_bookmark(20, None);
+        state.add_bookmark(30, None);
+
+        // Remove middle bookmark
+        assert!(state.remove_bookmark(20));
+        assert_eq!(state.bookmarks.len(), 2);
+        assert_eq!(state.bookmarks[0].frame, 10);
+        assert_eq!(state.bookmarks[1].frame, 30);
+
+        // Removing non-existent bookmark should return false
+        assert!(!state.remove_bookmark(20));
+        assert_eq!(state.bookmarks.len(), 2);
+    }
+
+    #[test]
+    fn test_bookmark_state_toggle() {
+        let mut state = BookmarkState::new();
+
+        // Toggle adds when not present
+        let (added, removed) = state.toggle_bookmark(10);
+        assert!(added);
+        assert!(!removed);
+        assert_eq!(state.bookmarks.len(), 1);
+
+        // Toggle removes when present
+        let (added, removed) = state.toggle_bookmark(10);
+        assert!(!added);
+        assert!(removed);
+        assert!(state.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn test_bookmark_state_has_bookmark_at() {
+        let mut state = BookmarkState::new();
+        state.add_bookmark(10, None);
+
+        assert!(state.has_bookmark_at(10));
+        assert!(!state.has_bookmark_at(20));
+    }
+
+    #[test]
+    fn test_bookmark_state_get_next() {
+        let mut state = BookmarkState::new();
+        state.add_bookmark(10, None);
+        state.add_bookmark(20, None);
+        state.add_bookmark(30, None);
+
+        // Get next from before first bookmark
+        assert_eq!(state.get_next_bookmark(5), Some(10));
+
+        // Get next from first bookmark
+        assert_eq!(state.get_next_bookmark(10), Some(20));
+
+        // Get next from middle
+        assert_eq!(state.get_next_bookmark(15), Some(20));
+
+        // Get next from after last bookmark (wraps around)
+        assert_eq!(state.get_next_bookmark(30), Some(10));
+        assert_eq!(state.get_next_bookmark(35), Some(10));
+
+        // Empty state returns None
+        let empty_state = BookmarkState::new();
+        assert_eq!(empty_state.get_next_bookmark(10), None);
+    }
+
+    #[test]
+    fn test_bookmark_state_get_previous() {
+        let mut state = BookmarkState::new();
+        state.add_bookmark(10, None);
+        state.add_bookmark(20, None);
+        state.add_bookmark(30, None);
+
+        // Get previous from after last bookmark
+        assert_eq!(state.get_previous_bookmark(35), Some(30));
+
+        // Get previous from last bookmark
+        assert_eq!(state.get_previous_bookmark(30), Some(20));
+
+        // Get previous from middle
+        assert_eq!(state.get_previous_bookmark(25), Some(20));
+
+        // Get previous from before first bookmark (wraps around)
+        assert_eq!(state.get_previous_bookmark(10), Some(30));
+        assert_eq!(state.get_previous_bookmark(5), Some(30));
+
+        // Empty state returns None
+        let empty_state = BookmarkState::new();
+        assert_eq!(empty_state.get_previous_bookmark(10), None);
+    }
+
+    #[test]
+    fn test_bookmark_state_get_bookmark() {
+        let mut state = BookmarkState::new();
+        state.add_bookmark(10, Some("First".to_string()));
+        state.add_bookmark(20, Some("Second".to_string()));
+
+        let bookmark = state.get_bookmark(0).unwrap();
+        assert_eq!(bookmark.frame, 10);
+        assert_eq!(bookmark.label, Some("First".to_string()));
+
+        let bookmark = state.get_bookmark(1).unwrap();
+        assert_eq!(bookmark.frame, 20);
+        assert_eq!(bookmark.label, Some("Second".to_string()));
+
+        assert!(state.get_bookmark(2).is_none());
+    }
+
+    #[test]
+    fn test_bookmark_state_is_empty() {
+        let mut state = BookmarkState::new();
+        assert!(state.is_empty());
+
+        state.add_bookmark(10, None);
+        assert!(!state.is_empty());
+
+        state.remove_bookmark(10);
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn test_bookmark_state_reset() {
+        let mut state = BookmarkState::new();
+        state.add_bookmark(10, None);
+        state.add_bookmark(20, None);
+        state.label_input = "Test".to_string();
+        state.panel_open = true;
+        state.editing_index = Some(0);
+        state.editing_label = "Edit".to_string();
+
+        state.reset();
+
+        assert!(state.bookmarks.is_empty());
+        assert!(state.label_input.is_empty());
+        assert!(state.editing_index.is_none());
+        assert!(state.editing_label.is_empty());
+        // panel_open should remain unchanged
+        assert!(state.panel_open);
+    }
+
+    #[test]
+    fn test_bookmark_state_update_label() {
+        let mut state = BookmarkState::new();
+        state.add_bookmark(10, Some("Original".to_string()));
+
+        // Update label
+        assert!(state.update_bookmark_label(0, "Updated".to_string()));
+        assert_eq!(state.bookmarks[0].label, Some("Updated".to_string()));
+
+        // Clear label with empty string
+        assert!(state.update_bookmark_label(0, String::new()));
+        assert!(state.bookmarks[0].label.is_none());
+
+        // Invalid index
+        assert!(!state.update_bookmark_label(99, "Test".to_string()));
+    }
+
+    #[test]
+    fn test_bookmark_state_remove_by_index() {
+        let mut state = BookmarkState::new();
+        state.add_bookmark(10, None);
+        state.add_bookmark(20, None);
+        state.add_bookmark(30, None);
+
+        // Remove middle
+        assert_eq!(state.remove_bookmark_by_index(1), Some(20));
+        assert_eq!(state.bookmarks.len(), 2);
+        assert_eq!(state.bookmarks[0].frame, 10);
+        assert_eq!(state.bookmarks[1].frame, 30);
+
+        // Invalid index
+        assert!(state.remove_bookmark_by_index(99).is_none());
+    }
+
+    #[test]
+    fn test_bookmark_state_editing() {
+        let mut state = BookmarkState::new();
+        state.add_bookmark(10, Some("Original".to_string()));
+        state.add_bookmark(20, None);
+
+        // Start editing first bookmark
+        state.start_editing(0);
+        assert_eq!(state.editing_index, Some(0));
+        assert_eq!(state.editing_label, "Original");
+
+        // Modify and finish editing
+        state.editing_label = "Modified".to_string();
+        assert!(state.finish_editing());
+        assert!(state.editing_index.is_none());
+        assert!(state.editing_label.is_empty());
+        assert_eq!(state.bookmarks[0].label, Some("Modified".to_string()));
+
+        // Start editing second bookmark (no label)
+        state.start_editing(1);
+        assert_eq!(state.editing_index, Some(1));
+        assert!(state.editing_label.is_empty());
+
+        // Cancel editing
+        state.editing_label = "Should not save".to_string();
+        state.cancel_editing();
+        assert!(state.editing_index.is_none());
+        assert!(state.editing_label.is_empty());
+        assert!(state.bookmarks[1].label.is_none()); // Label should not change
+
+        // Finish editing without starting should return false
+        assert!(!state.finish_editing());
     }
 }

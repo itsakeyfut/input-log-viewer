@@ -5,10 +5,11 @@
 
 use eframe::egui;
 
+use crate::core::log::Bookmark;
 use crate::core::playback::{PlaybackState, SPEED_OPTIONS};
 
 /// User actions that can be triggered from the controls panel.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ControlAction {
     /// Toggle between play and pause
     TogglePlayPause,
@@ -24,6 +25,20 @@ pub enum ControlAction {
     SetSpeed(f32),
     /// Seek to a specific frame (from scrubber)
     SeekToFrame(u64),
+    /// Toggle bookmark at current frame
+    ToggleBookmark,
+    /// Go to the next bookmark
+    NextBookmark,
+    /// Go to the previous bookmark
+    PreviousBookmark,
+    /// Jump to a specific bookmark by index
+    JumpToBookmark(usize),
+    /// Remove a bookmark by index (for future bookmark panel)
+    #[allow(dead_code)]
+    RemoveBookmark(usize),
+    /// Add bookmark with label at current frame (for future bookmark panel)
+    #[allow(dead_code)]
+    AddBookmarkWithLabel(String),
 }
 
 /// Renders playback controls and returns any actions triggered by user interaction.
@@ -42,6 +57,10 @@ pub struct ControlsRenderer<'a> {
     at_end: bool,
     /// Mutable frame value for inline editing
     frame_input: &'a mut u64,
+    /// Bookmarks for the current session
+    bookmarks: &'a [Bookmark],
+    /// Whether the current frame has a bookmark
+    has_bookmark_at_current: bool,
 }
 
 impl<'a> ControlsRenderer<'a> {
@@ -52,10 +71,12 @@ impl<'a> ControlsRenderer<'a> {
         playback: &'a PlaybackState,
         total_frames: u64,
         frame_input: &'a mut u64,
+        bookmarks: &'a [Bookmark],
     ) -> Self {
         // Pre-compute boundary states for button disabling
         let at_start = playback.is_at_start();
         let at_end = playback.is_at_end(total_frames);
+        let has_bookmark_at_current = bookmarks.iter().any(|b| b.frame == playback.current_frame);
 
         Self {
             enabled,
@@ -65,39 +86,48 @@ impl<'a> ControlsRenderer<'a> {
             at_start,
             at_end,
             frame_input,
+            bookmarks,
+            has_bookmark_at_current,
         }
     }
 
     /// Render the controls and return any triggered action.
     pub fn render(&mut self, ui: &mut egui::Ui) -> Option<ControlAction> {
-        let mut action: Option<ControlAction> = None;
+        let mut nav_action: Option<ControlAction> = None;
+        let mut frame_action: Option<ControlAction> = None;
+        let mut speed_action: Option<ControlAction> = None;
+        let mut scrubber_action: Option<ControlAction> = None;
+        let mut bookmark_action: Option<ControlAction> = None;
 
         ui.vertical(|ui| {
             // Playback controls row
             ui.horizontal(|ui| {
-                action = self.render_navigation_buttons(ui).or(action);
+                nav_action = self.render_navigation_buttons(ui);
                 ui.separator();
-                action = self.render_frame_counter(ui).or(action);
+                frame_action = self.render_frame_counter(ui);
                 ui.separator();
-                action = self.render_speed_control(ui).or(action);
+                speed_action = self.render_speed_control(ui);
             });
 
             ui.add_space(4.0);
 
             // Timeline scrubber row
             ui.horizontal(|ui| {
-                action = self.render_scrubber(ui).or(action);
+                scrubber_action = self.render_scrubber(ui);
             });
 
             // Bookmarks row
             ui.horizontal(|ui| {
-                ui.label("Bookmarks:");
-                ui.label("(none)");
-                // TODO: Display bookmarks in Phase 3
+                bookmark_action = self.render_bookmarks_row(ui);
             });
         });
 
-        action
+        // Return the first action that was triggered (priority order)
+        nav_action
+            .or(frame_action)
+            .or(speed_action)
+            .or(scrubber_action)
+            .or(bookmark_action)
     }
 
     /// Render navigation buttons and return any triggered action.
@@ -245,6 +275,101 @@ impl<'a> ControlsRenderer<'a> {
                     });
                 });
             });
+        });
+
+        action
+    }
+
+    /// Render the bookmarks row with toggle button and bookmark list.
+    fn render_bookmarks_row(&self, ui: &mut egui::Ui) -> Option<ControlAction> {
+        let mut action: Option<ControlAction> = None;
+
+        ui.add_enabled_ui(self.enabled, |ui| {
+            // Toggle bookmark button
+            let toggle_text = if self.has_bookmark_at_current {
+                "★ Remove"
+            } else {
+                "☆ Add"
+            };
+            let toggle_tooltip = if self.has_bookmark_at_current {
+                "Remove bookmark at current frame (B)"
+            } else {
+                "Add bookmark at current frame (B)"
+            };
+
+            if ui
+                .button(toggle_text)
+                .on_hover_text(toggle_tooltip)
+                .clicked()
+            {
+                action = Some(ControlAction::ToggleBookmark);
+            }
+
+            ui.separator();
+
+            // Bookmark navigation buttons (only enabled if there are bookmarks)
+            let has_bookmarks = !self.bookmarks.is_empty();
+
+            ui.add_enabled_ui(has_bookmarks, |ui| {
+                if ui
+                    .button("◀ Prev")
+                    .on_hover_text("Go to previous bookmark")
+                    .clicked()
+                {
+                    action = Some(ControlAction::PreviousBookmark);
+                }
+
+                if ui
+                    .button("Next ▶")
+                    .on_hover_text("Go to next bookmark")
+                    .clicked()
+                {
+                    action = Some(ControlAction::NextBookmark);
+                }
+            });
+
+            ui.separator();
+
+            // Display bookmark chips
+            ui.label("Bookmarks:");
+
+            if self.bookmarks.is_empty() {
+                ui.label("(none)");
+            } else {
+                // Use a scroll area if there are many bookmarks
+                egui::ScrollArea::horizontal()
+                    .max_width(ui.available_width() - 10.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for (index, bookmark) in self.bookmarks.iter().enumerate() {
+                                let is_current = bookmark.frame == self.playback.current_frame;
+                                let label = if let Some(ref label) = bookmark.label {
+                                    format!("★ F{} - {}", bookmark.frame, label)
+                                } else {
+                                    format!("★ F{}", bookmark.frame)
+                                };
+
+                                // Style the button differently if it's the current frame
+                                let button = if is_current {
+                                    egui::Button::new(
+                                        egui::RichText::new(&label)
+                                            .color(egui::Color32::from_rgb(255, 200, 100)),
+                                    )
+                                } else {
+                                    egui::Button::new(&label)
+                                };
+
+                                if ui
+                                    .add(button)
+                                    .on_hover_text(format!("Jump to frame {}", bookmark.frame))
+                                    .clicked()
+                                {
+                                    action = Some(ControlAction::JumpToBookmark(index));
+                                }
+                            }
+                        });
+                    });
+            }
         });
 
         action
