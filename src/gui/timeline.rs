@@ -242,7 +242,7 @@ impl<'a> TimelineRenderer<'a> {
         self.handle_mouse_interaction(ui, &response, timeline_rect, scrollbar_rect)
     }
 
-    /// Handle mouse interactions: wheel scroll, Ctrl+wheel zoom, and scrollbar drag.
+    /// Handle mouse interactions: wheel scroll, Ctrl+wheel zoom, scrollbar drag, and timeline drag-to-pan.
     fn handle_mouse_interaction(
         &self,
         ui: &egui::Ui,
@@ -254,6 +254,11 @@ impl<'a> TimelineRenderer<'a> {
 
         // Handle scrollbar drag
         if let Some(action) = self.handle_scrollbar_drag(response, scrollbar_rect) {
+            return Some(action);
+        }
+
+        // Handle timeline drag-to-pan
+        if let Some(action) = self.handle_timeline_drag(response, timeline_rect) {
             return Some(action);
         }
 
@@ -335,6 +340,52 @@ impl<'a> TimelineRenderer<'a> {
 
         Some(ViewAction::Scroll {
             scroll_offset: new_scroll_offset.min(max_scroll),
+        })
+    }
+
+    /// Handle drag-to-pan interaction on the timeline area.
+    fn handle_timeline_drag(
+        &self,
+        response: &egui::Response,
+        timeline_rect: Rect,
+    ) -> Option<ViewAction> {
+        if !response.dragged() {
+            return None;
+        }
+
+        // Check if drag started in timeline area (not scrollbar)
+        let drag_origin = response.interact_pointer_pos()?;
+        if !timeline_rect.contains(drag_origin) {
+            return None;
+        }
+
+        // Get the drag delta in pixels
+        let drag_delta = response.drag_delta();
+        if drag_delta.x.abs() < 0.1 {
+            return None;
+        }
+
+        // Convert pixel delta to frame delta based on current zoom level
+        let frame_width = timeline_rect.width() / self.config.visible_frames as f32;
+        let frame_delta = -drag_delta.x / frame_width;
+
+        // Calculate new scroll offset
+        let current_scroll = self.config.scroll_offset as f64;
+        let new_scroll = current_scroll + frame_delta as f64;
+
+        let max_scroll = self
+            .config
+            .total_frames
+            .saturating_sub(self.config.visible_frames) as f64;
+
+        let new_scroll_offset = new_scroll.clamp(0.0, max_scroll) as u64;
+
+        if new_scroll_offset == self.config.scroll_offset {
+            return None;
+        }
+
+        Some(ViewAction::Scroll {
+            scroll_offset: new_scroll_offset,
         })
     }
 

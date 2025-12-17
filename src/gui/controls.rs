@@ -46,6 +46,8 @@ pub enum ControlAction {
     AddBookmarkWithLabel(String),
     /// Set zoom level (visible frames)
     SetZoom(u64),
+    /// Toggle auto-scroll (keep current frame visible during playback)
+    ToggleAutoScroll,
 }
 
 /// Renders playback controls and returns any actions triggered by user interaction.
@@ -72,6 +74,8 @@ pub struct ControlsRenderer<'a> {
     visible_frames: u64,
     /// Mutable zoom value for inline editing
     zoom_input: &'a mut u64,
+    /// Whether auto-scroll is enabled
+    auto_scroll: bool,
 }
 
 impl<'a> ControlsRenderer<'a> {
@@ -85,6 +89,7 @@ impl<'a> ControlsRenderer<'a> {
         bookmarks: &'a [Bookmark],
         visible_frames: u64,
         zoom_input: &'a mut u64,
+        auto_scroll: bool,
     ) -> Self {
         // Pre-compute boundary states for button disabling
         let at_start = playback.is_at_start();
@@ -103,6 +108,7 @@ impl<'a> ControlsRenderer<'a> {
             has_bookmark_at_current,
             visible_frames,
             zoom_input,
+            auto_scroll,
         }
     }
 
@@ -112,6 +118,7 @@ impl<'a> ControlsRenderer<'a> {
         let mut frame_action: Option<ControlAction> = None;
         let mut speed_action: Option<ControlAction> = None;
         let mut zoom_action: Option<ControlAction> = None;
+        let mut auto_scroll_action: Option<ControlAction> = None;
         let mut scrubber_action: Option<ControlAction> = None;
         let mut bookmark_action: Option<ControlAction> = None;
 
@@ -125,6 +132,8 @@ impl<'a> ControlsRenderer<'a> {
                 speed_action = self.render_speed_control(ui);
                 ui.separator();
                 zoom_action = self.render_zoom_control(ui);
+                ui.separator();
+                auto_scroll_action = self.render_auto_scroll_toggle(ui);
             });
 
             ui.add_space(4.0);
@@ -145,6 +154,7 @@ impl<'a> ControlsRenderer<'a> {
             .or(frame_action)
             .or(speed_action)
             .or(zoom_action)
+            .or(auto_scroll_action)
             .or(scrubber_action)
             .or(bookmark_action)
     }
@@ -286,6 +296,37 @@ impl<'a> ControlsRenderer<'a> {
             // Trigger zoom when value changes (drag or direct input)
             if response.changed() {
                 action = Some(ControlAction::SetZoom(*self.zoom_input));
+            }
+        });
+
+        action
+    }
+
+    /// Render auto-scroll toggle and return any triggered action.
+    fn render_auto_scroll_toggle(&self, ui: &mut egui::Ui) -> Option<ControlAction> {
+        let mut action: Option<ControlAction> = None;
+
+        ui.add_enabled_ui(self.enabled, |ui| {
+            let toggle_text = if self.auto_scroll {
+                "Auto-scroll: ON"
+            } else {
+                "Auto-scroll: OFF"
+            };
+
+            let button = if self.auto_scroll {
+                egui::Button::new(
+                    egui::RichText::new(toggle_text).color(egui::Color32::from_rgb(100, 200, 100)),
+                )
+            } else {
+                egui::Button::new(egui::RichText::new(toggle_text).color(egui::Color32::GRAY))
+            };
+
+            if ui
+                .add(button)
+                .on_hover_text("Toggle auto-scroll to keep current frame visible during playback")
+                .clicked()
+            {
+                action = Some(ControlAction::ToggleAutoScroll);
             }
         });
 

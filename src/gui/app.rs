@@ -360,6 +360,8 @@ pub struct InputLogViewerApp {
     search: SearchState,
     /// Bookmark state for managing frame bookmarks
     bookmarks: BookmarkState,
+    /// Whether to automatically scroll to keep current frame visible during playback
+    auto_scroll: bool,
 }
 
 impl InputLogViewerApp {
@@ -378,6 +380,7 @@ impl InputLogViewerApp {
             zoom_input_value: 100,
             search: SearchState::new(),
             bookmarks: BookmarkState::new(),
+            auto_scroll: true,
         }
     }
 
@@ -527,8 +530,10 @@ impl eframe::App for InputLogViewerApp {
                         // Playback ended (loop disabled and reached end)
                         self.state = AppState::Ready;
                     }
-                    // Auto-scroll to keep current frame visible
-                    self.ensure_frame_visible(total_frames);
+                    // Auto-scroll to keep current frame visible (if enabled)
+                    if self.auto_scroll {
+                        self.ensure_frame_visible(total_frames);
+                    }
                 }
             }
             // Keep requesting repaints while playing
@@ -1418,6 +1423,7 @@ impl InputLogViewerApp {
         let mut frame_input = self.frame_input_value;
         let mut zoom_input = self.zoom_input_value;
         let visible_frames = self.timeline_config.visible_frames;
+        let auto_scroll = self.auto_scroll;
 
         egui::TopBottomPanel::bottom("controls")
             .min_height(80.0)
@@ -1431,6 +1437,7 @@ impl InputLogViewerApp {
                     &self.bookmarks.bookmarks,
                     visible_frames,
                     &mut zoom_input,
+                    auto_scroll,
                 );
                 action = renderer.render(ui);
             });
@@ -1567,6 +1574,9 @@ impl InputLogViewerApp {
                 if self.timeline_config.scroll_offset > max_scroll {
                     self.timeline_config.scroll_offset = max_scroll;
                 }
+            }
+            ControlAction::ToggleAutoScroll => {
+                self.auto_scroll = !self.auto_scroll;
             }
         }
     }
