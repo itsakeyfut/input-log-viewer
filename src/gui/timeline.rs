@@ -7,7 +7,7 @@ use eframe::egui::{self, Color32, Painter, Pos2, Rect, Stroke};
 use std::collections::HashMap;
 
 use crate::core::filter::FilterState;
-use crate::core::log::{ButtonState, InputEvent, InputKind, InputLog, InputMapping};
+use crate::core::log::{Bookmark, ButtonState, InputEvent, InputKind, InputLog, InputMapping};
 use crate::core::search::SearchResult;
 
 /// Default number of visible frames in the timeline.
@@ -58,6 +58,8 @@ pub struct TimelineRenderer<'a> {
     filter: &'a FilterState,
     /// Search results for highlighting (optional)
     search_results: Option<&'a SearchResult>,
+    /// Bookmarks to display on the timeline (optional)
+    bookmarks: Option<&'a [Bookmark]>,
     /// Effective mappings including fallback entries for unmapped IDs
     effective_mappings: Vec<InputMapping>,
     /// Visible mappings based on current filter (indices into effective_mappings)
@@ -110,6 +112,7 @@ impl<'a> TimelineRenderer<'a> {
             config,
             filter,
             search_results: None,
+            bookmarks: None,
             effective_mappings,
             visible_mapping_indices,
             id_to_row,
@@ -120,6 +123,12 @@ impl<'a> TimelineRenderer<'a> {
     /// Set search results for highlighting matching frames.
     pub fn with_search_results(mut self, results: &'a SearchResult) -> Self {
         self.search_results = Some(results);
+        self
+    }
+
+    /// Set bookmarks for displaying on the timeline.
+    pub fn with_bookmarks(mut self, bookmarks: &'a [Bookmark]) -> Self {
+        self.bookmarks = Some(bookmarks);
         self
     }
 
@@ -177,6 +186,7 @@ impl<'a> TimelineRenderer<'a> {
         self.draw_row_labels(&painter, content_rect, num_rows);
         self.draw_grid(&painter, content_rect, timeline_rect, num_rows);
         self.draw_search_highlights(&painter, content_rect, timeline_rect);
+        self.draw_bookmark_markers(&painter, rect, timeline_rect);
         self.draw_events(&painter, timeline_rect);
         self.draw_current_frame_indicator(&painter, content_rect, timeline_rect);
         self.draw_button_state_legend(&painter, legend_area_rect);
@@ -626,6 +636,51 @@ impl<'a> TimelineRenderer<'a> {
                 );
                 painter.rect_filled(marker_rect, 2.0, Color32::from_rgb(100, 200, 255));
             }
+        }
+    }
+
+    /// Draw bookmark markers (★) on the timeline.
+    fn draw_bookmark_markers(&self, painter: &Painter, rect: Rect, timeline_rect: Rect) {
+        let bookmarks = match self.bookmarks {
+            Some(b) if !b.is_empty() => b,
+            _ => return,
+        };
+
+        let start_frame = self.config.scroll_offset;
+        let end_frame = start_frame + self.config.visible_frames;
+        let frame_width = timeline_rect.width() / self.config.visible_frames as f32;
+
+        // Bookmark marker color (gold/yellow)
+        let bookmark_color = Color32::from_rgb(255, 215, 0);
+
+        // Draw marker for each bookmark in the visible range
+        for bookmark in bookmarks {
+            if bookmark.frame < start_frame || bookmark.frame >= end_frame {
+                continue;
+            }
+
+            let x = timeline_rect.left()
+                + ((bookmark.frame - start_frame) as f32 * frame_width)
+                + frame_width / 2.0;
+
+            // Draw star marker at the top of the header
+            painter.text(
+                Pos2::new(x, rect.top() + HEADER_HEIGHT / 2.0 - 1.0),
+                egui::Align2::CENTER_CENTER,
+                "★",
+                egui::FontId::proportional(12.0),
+                bookmark_color,
+            );
+
+            // Draw a subtle vertical line from header to the content area
+            let line_color = Color32::from_rgba_unmultiplied(255, 215, 0, 80);
+            painter.line_segment(
+                [
+                    Pos2::new(x, rect.top() + HEADER_HEIGHT),
+                    Pos2::new(x, timeline_rect.bottom()),
+                ],
+                Stroke::new(1.0, line_color),
+            );
         }
     }
 
