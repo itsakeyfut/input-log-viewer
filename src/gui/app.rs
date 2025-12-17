@@ -423,10 +423,10 @@ impl InputLogViewerApp {
                         self.filter_popup_open = !self.filter_popup_open;
                     }
 
-                    // Show filter count indicator
+                    // Show filter count indicator (using effective mappings to include unmapped IDs)
                     if let Some(ref log) = self.log {
                         let visible_count = self.filter.visible_ids.len();
-                        let total_count = log.mappings.len();
+                        let total_count = log.get_effective_mappings().len();
                         if visible_count < total_count {
                             ui.label(format!("({}/{})", visible_count, total_count));
                         }
@@ -512,18 +512,14 @@ impl InputLogViewerApp {
 
                     ui.separator();
 
-                    // Individual input checkboxes
+                    // Individual input checkboxes (using effective mappings to include unmapped IDs)
                     ui.label("Inputs:");
+                    let effective_mappings = log.get_effective_mappings();
                     egui::ScrollArea::vertical()
                         .max_height(250.0)
                         .show(ui, |ui| {
-                            for mapping in &log.mappings {
+                            for mapping in &effective_mappings {
                                 let mut is_visible = self.filter.visible_ids.contains(&mapping.id);
-                                let label = if mapping.name.is_empty() {
-                                    format!("Input {}", mapping.id)
-                                } else {
-                                    mapping.name.clone()
-                                };
 
                                 // Show color indicator if available
                                 ui.horizontal(|ui| {
@@ -536,7 +532,7 @@ impl InputLogViewerApp {
                                         );
                                         ui.painter().rect_filled(rect, 2.0, color32);
                                     }
-                                    if ui.checkbox(&mut is_visible, &label).changed() {
+                                    if ui.checkbox(&mut is_visible, &mapping.name).changed() {
                                         self.filter.set_id_visible(mapping.id, is_visible);
                                     }
                                 });
@@ -548,7 +544,7 @@ impl InputLogViewerApp {
                     // Select All / Deselect All buttons
                     ui.horizontal(|ui| {
                         if ui.button("All").clicked() {
-                            self.filter.select_all(&log.mappings);
+                            self.filter.select_all(&effective_mappings);
                         }
                         if ui.button("None").clicked() {
                             self.filter.deselect_all();
@@ -589,36 +585,31 @@ impl InputLogViewerApp {
                 ui.separator();
 
                 if let Some(ref log) = self.log {
+                    // Get effective mappings to include unmapped IDs
+                    let effective_mappings = log.get_effective_mappings();
+
                     // Input selector dropdown
                     ui.horizontal(|ui| {
                         ui.label("Input:");
                         ui.add_space(10.0);
-                        let selected_name = if self.search.selected_input_index < log.mappings.len()
-                        {
-                            let mapping = &log.mappings[self.search.selected_input_index];
-                            if mapping.name.is_empty() {
-                                format!("Input {}", mapping.id)
+                        let selected_name =
+                            if self.search.selected_input_index < effective_mappings.len() {
+                                effective_mappings[self.search.selected_input_index]
+                                    .name
+                                    .clone()
                             } else {
-                                mapping.name.clone()
-                            }
-                        } else {
-                            "Select input...".to_string()
-                        };
+                                "Select input...".to_string()
+                            };
 
                         egui::ComboBox::from_id_salt("search_input_combo")
                             .selected_text(selected_name)
                             .width(160.0)
                             .show_ui(ui, |ui| {
-                                for (i, mapping) in log.mappings.iter().enumerate() {
-                                    let label = if mapping.name.is_empty() {
-                                        format!("Input {}", mapping.id)
-                                    } else {
-                                        mapping.name.clone()
-                                    };
+                                for (i, mapping) in effective_mappings.iter().enumerate() {
                                     if ui
                                         .selectable_label(
                                             self.search.selected_input_index == i,
-                                            &label,
+                                            &mapping.name,
                                         )
                                         .clicked()
                                     {
@@ -633,8 +624,10 @@ impl InputLogViewerApp {
                     ui.add_space(4.0);
 
                     // Get the kind of the selected input to determine if state filter applies
-                    let selected_kind = if self.search.selected_input_index < log.mappings.len() {
-                        let mapping_id = log.mappings[self.search.selected_input_index].id;
+                    let selected_kind = if self.search.selected_input_index
+                        < effective_mappings.len()
+                    {
+                        let mapping_id = effective_mappings[self.search.selected_input_index].id;
                         log.events
                             .iter()
                             .find(|e| e.id == mapping_id)
@@ -752,11 +745,12 @@ impl InputLogViewerApp {
     /// Execute the search based on current search state.
     fn perform_search(&mut self) {
         if let Some(ref log) = self.log {
-            if self.search.selected_input_index >= log.mappings.len() {
+            let effective_mappings = log.get_effective_mappings();
+            if self.search.selected_input_index >= effective_mappings.len() {
                 return;
             }
 
-            let mapping = &log.mappings[self.search.selected_input_index];
+            let mapping = &effective_mappings[self.search.selected_input_index];
             let input_id = mapping.id;
 
             // Build the search query

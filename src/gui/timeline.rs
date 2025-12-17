@@ -58,52 +58,62 @@ pub struct TimelineRenderer<'a> {
     filter: &'a FilterState,
     /// Search results for highlighting (optional)
     search_results: Option<&'a SearchResult>,
-    /// Visible mappings based on current filter
-    visible_mappings: Vec<&'a InputMapping>,
+    /// Effective mappings including fallback entries for unmapped IDs
+    effective_mappings: Vec<InputMapping>,
+    /// Visible mappings based on current filter (indices into effective_mappings)
+    visible_mapping_indices: Vec<usize>,
     /// Map from input ID to row index (among visible rows)
     id_to_row: HashMap<u32, usize>,
-    /// Map from input ID to its mapping (for name and color)
-    id_to_mapping: HashMap<u32, &'a InputMapping>,
+    /// Map from input ID to index in effective_mappings (for name and color)
+    id_to_mapping_index: HashMap<u32, usize>,
 }
 
 impl<'a> TimelineRenderer<'a> {
     /// Create a new timeline renderer for the given log.
     pub fn new(log: &'a InputLog, config: &'a TimelineConfig, filter: &'a FilterState) -> Self {
+        // Get effective mappings (includes fallback entries for unmapped IDs)
+        let effective_mappings = log.get_effective_mappings();
+
         // Build ID to kind mapping by scanning events
         let mut id_to_kind: HashMap<u32, InputKind> = HashMap::new();
         for event in &log.events {
             id_to_kind.entry(event.id).or_insert(event.kind);
         }
 
-        // Filter visible mappings based on filter state
-        let visible_mappings: Vec<&InputMapping> = log
-            .mappings
-            .iter()
-            .filter(|m| {
-                let kind = id_to_kind.get(&m.id).copied().unwrap_or(InputKind::Button);
-                filter.is_visible(m.id, kind)
-            })
-            .collect();
-
-        // Build ID to row mapping based on visible mappings order
-        let id_to_row: HashMap<u32, usize> = visible_mappings
+        // Build ID to mapping index lookup
+        let id_to_mapping_index: HashMap<u32, usize> = effective_mappings
             .iter()
             .enumerate()
             .map(|(i, m)| (m.id, i))
             .collect();
 
-        // Build ID to mapping lookup
-        let id_to_mapping: HashMap<u32, &InputMapping> =
-            log.mappings.iter().map(|m| (m.id, m)).collect();
+        // Filter visible mappings based on filter state (store indices)
+        let visible_mapping_indices: Vec<usize> = effective_mappings
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                let kind = id_to_kind.get(&m.id).copied().unwrap_or(InputKind::Button);
+                filter.is_visible(m.id, kind)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        // Build ID to row mapping based on visible mappings order
+        let id_to_row: HashMap<u32, usize> = visible_mapping_indices
+            .iter()
+            .enumerate()
+            .map(|(row, &idx)| (effective_mappings[idx].id, row))
+            .collect();
 
         Self {
             log,
             config,
             filter,
             search_results: None,
-            visible_mappings,
+            effective_mappings,
+            visible_mapping_indices,
             id_to_row,
-            id_to_mapping,
+            id_to_mapping_index,
         }
     }
 
@@ -115,9 +125,9 @@ impl<'a> TimelineRenderer<'a> {
 
     /// Get the color for an input ID, or a default color if not mapped.
     fn get_color(&self, id: u32) -> Color32 {
-        self.id_to_mapping
+        self.id_to_mapping_index
             .get(&id)
-            .and_then(|m| m.color)
+            .and_then(|&idx| self.effective_mappings[idx].color)
             .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
             .unwrap_or(Color32::LIGHT_GRAY)
     }
@@ -129,14 +139,14 @@ impl<'a> TimelineRenderer<'a> {
 
     /// Calculate the total height needed for the timeline.
     pub fn calculate_height(&self) -> f32 {
-        let num_rows = self.visible_mappings.len().max(1);
+        let num_rows = self.visible_mapping_indices.len().max(1);
         HEADER_HEIGHT + (num_rows as f32 * ROW_HEIGHT) + LEGEND_HEIGHT
     }
 
     /// Render the complete timeline.
     pub fn render(&self, ui: &mut egui::Ui) {
         let available_size = ui.available_size();
-        let num_rows = self.visible_mappings.len().max(1);
+        let num_rows = self.visible_mapping_indices.len().max(1);
         let grid_height = self.calculate_height().min(available_size.y - 10.0);
 
         let (response, painter) = ui.allocate_painter(
@@ -273,8 +283,9 @@ impl<'a> TimelineRenderer<'a> {
             let row_top = rect.top() + HEADER_HEIGHT + (i as f32 * ROW_HEIGHT);
             let row_center_y = row_top + ROW_HEIGHT / 2.0;
 
-            if i < self.visible_mappings.len() {
-                let mapping = self.visible_mappings[i];
+            if i < self.visible_mapping_indices.len() {
+                let mapping_idx = self.visible_mapping_indices[i];
+                let mapping = &self.effective_mappings[mapping_idx];
                 let color = mapping
                     .color
                     .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
@@ -287,7 +298,7 @@ impl<'a> TimelineRenderer<'a> {
                 );
                 painter.rect_filled(indicator_rect, 2.0, color);
 
-                // Draw label text
+                // Draw label text (uses mapping name which includes fallback)
                 painter.text(
                     Pos2::new(rect.left() + 16.0, row_center_y),
                     egui::Align2::LEFT_CENTER,
