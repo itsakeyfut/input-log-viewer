@@ -607,6 +607,16 @@ impl InputLogViewerApp {
                 return Some(ControlAction::ToggleBookmark);
             }
 
+            // Plus (+/=): Increase playback speed
+            if i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals) {
+                return Some(ControlAction::IncreaseSpeed);
+            }
+
+            // Minus (-): Decrease playback speed
+            if i.key_pressed(egui::Key::Minus) {
+                return Some(ControlAction::DecreaseSpeed);
+            }
+
             None
         })
     }
@@ -1450,6 +1460,14 @@ impl InputLogViewerApp {
             }
             ControlAction::SetSpeed(speed) => {
                 self.playback.set_speed(speed);
+            }
+            ControlAction::IncreaseSpeed => {
+                let new_speed = self.playback.next_speed_preset();
+                self.playback.set_speed(new_speed);
+            }
+            ControlAction::DecreaseSpeed => {
+                let new_speed = self.playback.prev_speed_preset();
+                self.playback.set_speed(new_speed);
             }
             ControlAction::SeekToFrame(frame) => {
                 self.playback.set_frame(frame, total_frames);
