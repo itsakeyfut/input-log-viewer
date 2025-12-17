@@ -378,6 +378,44 @@ impl InputLogViewerApp {
         }
     }
 
+    /// Handle files dropped onto the application window.
+    ///
+    /// Validates the file extension (.ilj or .ilb) and loads the first valid file.
+    /// Multiple dropped files will only load the first one.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        // Only process drops when file operations are allowed
+        if !self.state.can_open_file() {
+            return;
+        }
+
+        // Check for dropped files
+        let dropped_file = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .first()
+                .and_then(|file| file.path.clone())
+        });
+
+        if let Some(path) = dropped_file {
+            // Validate file extension
+            let extension = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|s| s.to_lowercase());
+
+            match extension.as_deref() {
+                Some("ilj") | Some("ilb") => {
+                    self.load_file(path);
+                }
+                _ => {
+                    self.set_error(
+                        "Unsupported file format. Please drop an .ilj or .ilb file.".to_string(),
+                    );
+                }
+            }
+        }
+    }
+
     /// Open a file dialog and load the selected input log file (.ilj or .ilb).
     fn open_file_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
@@ -492,6 +530,9 @@ impl eframe::App for InputLogViewerApp {
             ctx.request_repaint();
         }
 
+        // Handle drag and drop file loading
+        self.handle_dropped_files(ctx);
+
         let total_frames = self
             .log
             .as_ref()
@@ -509,6 +550,9 @@ impl eframe::App for InputLogViewerApp {
         self.render_toolbar(ctx);
         self.render_controls(ctx);
         self.render_timeline(ctx);
+
+        // Render drag and drop overlay when files are being hovered
+        self.render_drag_overlay(ctx);
     }
 }
 
@@ -1223,6 +1267,75 @@ impl InputLogViewerApp {
                 }
             }
         }
+    }
+
+    /// Render a visual overlay when files are being dragged over the window.
+    fn render_drag_overlay(&self, ctx: &egui::Context) {
+        // Check if files are being hovered over the window
+        let is_hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+
+        if !is_hovering {
+            return;
+        }
+
+        // Check if we can accept files
+        if !self.state.can_open_file() {
+            return;
+        }
+
+        // Check if the first hovered file has a valid extension (matches drop behavior)
+        let has_valid_extension = ctx.input(|i| {
+            i.raw.hovered_files.first().is_some_and(|file| {
+                file.path
+                    .as_ref()
+                    .and_then(|p| p.extension())
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_lowercase())
+                    .is_some_and(|ext| ext == "ilj" || ext == "ilb")
+            })
+        });
+
+        // Render overlay (use viewport_rect for full viewport coverage)
+        let screen_rect = ctx.input(|i| i.viewport_rect());
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("drag_overlay"),
+        ));
+
+        // Semi-transparent background
+        let bg_color = if has_valid_extension {
+            egui::Color32::from_rgba_unmultiplied(76, 175, 80, 180) // Green
+        } else {
+            egui::Color32::from_rgba_unmultiplied(244, 67, 54, 180) // Red
+        };
+        painter.rect_filled(screen_rect, 0.0, bg_color);
+
+        // Border
+        let border_color = if has_valid_extension {
+            egui::Color32::from_rgb(76, 175, 80)
+        } else {
+            egui::Color32::from_rgb(244, 67, 54)
+        };
+        painter.rect_stroke(
+            screen_rect.shrink(4.0),
+            8.0,
+            egui::Stroke::new(4.0, border_color),
+            egui::StrokeKind::Inside,
+        );
+
+        // Text message
+        let text = if has_valid_extension {
+            "Drop to load file"
+        } else {
+            "Invalid file type\n(use .ilj or .ilb)"
+        };
+        painter.text(
+            screen_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(32.0),
+            egui::Color32::WHITE,
+        );
     }
 
     /// Render the status message if one is active.
