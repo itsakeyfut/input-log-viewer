@@ -181,6 +181,32 @@ impl PlaybackState {
         self.speed = speed.clamp(MIN_SPEED, MAX_SPEED);
     }
 
+    /// Get the next speed preset from SPEED_OPTIONS.
+    ///
+    /// Returns the next higher speed preset, or the maximum if already at max.
+    pub fn next_speed_preset(&self) -> f32 {
+        for &preset in SPEED_OPTIONS {
+            if preset > self.speed {
+                return preset;
+            }
+        }
+        // Already at or above max preset, return the last one
+        *SPEED_OPTIONS.last().unwrap_or(&DEFAULT_SPEED)
+    }
+
+    /// Get the previous speed preset from SPEED_OPTIONS.
+    ///
+    /// Returns the next lower speed preset, or the minimum if already at min.
+    pub fn prev_speed_preset(&self) -> f32 {
+        for &preset in SPEED_OPTIONS.iter().rev() {
+            if preset < self.speed {
+                return preset;
+            }
+        }
+        // Already at or below min preset, return the first one
+        *SPEED_OPTIONS.first().unwrap_or(&DEFAULT_SPEED)
+    }
+
     /// Set the playback range.
     ///
     /// # Arguments
@@ -477,5 +503,77 @@ mod tests {
         // With 1 total frame, frame 0 is both start and end
         assert!(state.is_at_start());
         assert!(state.is_at_end(1));
+    }
+
+    #[test]
+    fn test_next_speed_preset() {
+        let mut state = PlaybackState::new();
+
+        // Starting at 1.0x (default), next should be 2.0x
+        state.speed = 1.0;
+        assert_eq!(state.next_speed_preset(), 2.0);
+
+        // At 0.25x, next should be 0.5x
+        state.speed = 0.25;
+        assert_eq!(state.next_speed_preset(), 0.5);
+
+        // At 0.5x, next should be 1.0x
+        state.speed = 0.5;
+        assert_eq!(state.next_speed_preset(), 1.0);
+
+        // At 2.0x, next should be 4.0x
+        state.speed = 2.0;
+        assert_eq!(state.next_speed_preset(), 4.0);
+
+        // At 4.0x (max), should stay at 4.0x
+        state.speed = 4.0;
+        assert_eq!(state.next_speed_preset(), 4.0);
+
+        // At above max, should return max
+        state.speed = 5.0;
+        assert_eq!(state.next_speed_preset(), 4.0);
+
+        // At a value between presets, should return next higher preset
+        state.speed = 0.75;
+        assert_eq!(state.next_speed_preset(), 1.0);
+
+        state.speed = 1.5;
+        assert_eq!(state.next_speed_preset(), 2.0);
+    }
+
+    #[test]
+    fn test_prev_speed_preset() {
+        let mut state = PlaybackState::new();
+
+        // Starting at 1.0x (default), prev should be 0.5x
+        state.speed = 1.0;
+        assert_eq!(state.prev_speed_preset(), 0.5);
+
+        // At 4.0x, prev should be 2.0x
+        state.speed = 4.0;
+        assert_eq!(state.prev_speed_preset(), 2.0);
+
+        // At 2.0x, prev should be 1.0x
+        state.speed = 2.0;
+        assert_eq!(state.prev_speed_preset(), 1.0);
+
+        // At 0.5x, prev should be 0.25x
+        state.speed = 0.5;
+        assert_eq!(state.prev_speed_preset(), 0.25);
+
+        // At 0.25x (min), should stay at 0.25x
+        state.speed = 0.25;
+        assert_eq!(state.prev_speed_preset(), 0.25);
+
+        // At below min, should return min
+        state.speed = 0.1;
+        assert_eq!(state.prev_speed_preset(), 0.25);
+
+        // At a value between presets, should return next lower preset
+        state.speed = 0.75;
+        assert_eq!(state.prev_speed_preset(), 0.5);
+
+        state.speed = 1.5;
+        assert_eq!(state.prev_speed_preset(), 1.0);
     }
 }

@@ -23,6 +23,10 @@ pub enum ControlAction {
     GoToEnd,
     /// Change playback speed
     SetSpeed(f32),
+    /// Increase playback speed to next preset
+    IncreaseSpeed,
+    /// Decrease playback speed to previous preset
+    DecreaseSpeed,
     /// Seek to a specific frame (from scrubber)
     SeekToFrame(u64),
     /// Toggle bookmark at current frame
