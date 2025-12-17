@@ -1283,9 +1283,9 @@ impl InputLogViewerApp {
             return;
         }
 
-        // Get the file extensions being hovered
+        // Check if the first hovered file has a valid extension (matches drop behavior)
         let has_valid_extension = ctx.input(|i| {
-            i.raw.hovered_files.iter().any(|file| {
+            i.raw.hovered_files.first().is_some_and(|file| {
                 file.path
                     .as_ref()
                     .and_then(|p| p.extension())
