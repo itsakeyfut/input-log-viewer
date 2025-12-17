@@ -41,10 +41,12 @@ impl FilterState {
     }
 
     /// Initialize the filter with all input IDs from the given log.
+    /// This includes both explicitly mapped IDs and any unmapped IDs from events.
     /// This should be called when a new log file is loaded.
     pub fn initialize_from_log(&mut self, log: &InputLog) {
         self.visible_ids.clear();
-        for mapping in &log.mappings {
+        // Use get_effective_mappings to include both mapped and unmapped IDs
+        for mapping in log.get_effective_mappings() {
             self.visible_ids.insert(mapping.id);
         }
         self.initialized = true;
