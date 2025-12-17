@@ -25,6 +25,9 @@ const CELL_PADDING: f32 = 2.0;
 /// Height of the frame number header.
 const HEADER_HEIGHT: f32 = 20.0;
 
+/// Height of the legend area at the bottom.
+const LEGEND_HEIGHT: f32 = 30.0;
+
 /// Configuration for timeline rendering.
 pub struct TimelineConfig {
     /// First visible frame (for scrolling)
@@ -127,7 +130,7 @@ impl<'a> TimelineRenderer<'a> {
     /// Calculate the total height needed for the timeline.
     pub fn calculate_height(&self) -> f32 {
         let num_rows = self.visible_mappings.len().max(1);
-        HEADER_HEIGHT + (num_rows as f32 * ROW_HEIGHT)
+        HEADER_HEIGHT + (num_rows as f32 * ROW_HEIGHT) + LEGEND_HEIGHT
     }
 
     /// Render the complete timeline.
@@ -143,20 +146,30 @@ impl<'a> TimelineRenderer<'a> {
 
         let rect = response.rect;
 
-        // Calculate timeline area (excluding label column)
+        // Calculate content area (excluding legend area at bottom)
+        let content_bottom = rect.bottom() - LEGEND_HEIGHT;
+
+        // Calculate timeline area (excluding label column and legend area)
         let timeline_rect = Rect::from_min_max(
             Pos2::new(rect.left() + LABEL_WIDTH, rect.top() + HEADER_HEIGHT),
-            rect.max,
+            Pos2::new(rect.right(), content_bottom),
         );
+
+        // Calculate content rect (full width, excluding legend)
+        let content_rect = Rect::from_min_max(rect.min, Pos2::new(rect.right(), content_bottom));
+
+        // Calculate legend area rect
+        let legend_area_rect = Rect::from_min_max(Pos2::new(rect.left(), content_bottom), rect.max);
 
         // Draw components
         self.draw_background(&painter, rect);
-        self.draw_frame_header(&painter, rect, timeline_rect);
-        self.draw_row_labels(&painter, rect, num_rows);
-        self.draw_grid(&painter, rect, timeline_rect, num_rows);
-        self.draw_search_highlights(&painter, rect, timeline_rect);
+        self.draw_frame_header(&painter, content_rect, timeline_rect);
+        self.draw_row_labels(&painter, content_rect, num_rows);
+        self.draw_grid(&painter, content_rect, timeline_rect, num_rows);
+        self.draw_search_highlights(&painter, content_rect, timeline_rect);
         self.draw_events(&painter, timeline_rect);
-        self.draw_current_frame_indicator(&painter, rect, timeline_rect);
+        self.draw_current_frame_indicator(&painter, content_rect, timeline_rect);
+        self.draw_button_state_legend(&painter, legend_area_rect);
     }
 
     /// Draw the background and border.
@@ -355,7 +368,7 @@ impl<'a> TimelineRenderer<'a> {
 
             match event.kind {
                 InputKind::Button => {
-                    self.draw_button_event(painter, event, x, row_top, frame_width, color);
+                    self.draw_button_event(painter, x, row_top, frame_width, color, event.state);
                 }
                 InputKind::Axis1D => {
                     self.draw_axis1d_event(painter, event, x, row_top, frame_width, color);
@@ -367,15 +380,20 @@ impl<'a> TimelineRenderer<'a> {
         }
     }
 
-    /// Draw a button event as a rectangle.
+    /// Draw a button event as a rectangle with state-specific styling.
+    ///
+    /// Visual styles:
+    /// - Pressed: Green border with partial fill (button press started)
+    /// - Held: Solid fill with mapping color (button held down)
+    /// - Released: Red border, empty interior (button released)
     fn draw_button_event(
         &self,
         painter: &Painter,
-        event: &InputEvent,
         x: f32,
         row_top: f32,
         frame_width: f32,
         color: Color32,
+        state: ButtonState,
     ) {
         let cell_rect = Rect::from_min_size(
             Pos2::new(x + CELL_PADDING, row_top + CELL_PADDING),
@@ -385,28 +403,37 @@ impl<'a> TimelineRenderer<'a> {
             ),
         );
 
-        match event.state {
-            ButtonState::Pressed | ButtonState::Held => {
-                // Filled rectangle for pressed/held
-                painter.rect_filled(cell_rect, 2.0, color);
+        match state {
+            ButtonState::Pressed => {
+                // Green border with partial fill to indicate button press start
+                let pressed_green = Color32::from_rgb(76, 175, 80);
 
-                // Add a subtle highlight for "Pressed" to distinguish from "Held"
-                if event.state == ButtonState::Pressed {
-                    let highlight_rect =
-                        Rect::from_min_size(cell_rect.min, egui::vec2(cell_rect.width(), 3.0));
-                    painter.rect_filled(
-                        highlight_rect,
-                        2.0,
-                        Color32::from_rgba_unmultiplied(255, 255, 255, 80),
-                    );
-                }
-            }
-            ButtonState::Released => {
-                // Empty rectangle (just outline) for released
+                // Draw partial fill (50% opacity of the mapping color)
+                let fill_color =
+                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 128);
+                painter.rect_filled(cell_rect, 2.0, fill_color);
+
+                // Draw green border
                 painter.rect_stroke(
                     cell_rect,
                     2.0,
-                    Stroke::new(1.0, color.gamma_multiply(0.5)),
+                    Stroke::new(2.0, pressed_green),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            ButtonState::Held => {
+                // Solid fill with mapping color for held state
+                painter.rect_filled(cell_rect, 2.0, color);
+            }
+            ButtonState::Released => {
+                // Red border with empty interior for released state
+                let released_red = Color32::from_rgb(244, 67, 54);
+
+                // Draw empty rectangle with red border
+                painter.rect_stroke(
+                    cell_rect,
+                    2.0,
+                    Stroke::new(2.0, released_red),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -625,5 +652,91 @@ impl<'a> TimelineRenderer<'a> {
             highlight_color,
             Stroke::NONE,
         ));
+    }
+
+    /// Draw a legend explaining button state visual styles.
+    ///
+    /// Draws in the dedicated legend area at the bottom of the timeline.
+    fn draw_button_state_legend(&self, painter: &Painter, legend_area: Rect) {
+        // Legend configuration
+        const ICON_SIZE: f32 = 14.0;
+        const ICON_SPACING: f32 = 6.0;
+        const ITEM_SPACING: f32 = 20.0;
+        const TEXT_WIDTH: f32 = 52.0;
+
+        // Legend items
+        let items = [
+            ("Pressed", Color32::from_rgb(76, 175, 80)), // Green
+            ("Held", Color32::LIGHT_GRAY),
+            ("Released", Color32::from_rgb(244, 67, 54)), // Red
+        ];
+
+        // Calculate total width of legend items
+        let item_width = ICON_SIZE + ICON_SPACING + TEXT_WIDTH;
+        let total_width =
+            (item_width * items.len() as f32) + (ITEM_SPACING * (items.len() - 1) as f32);
+
+        // Position legend items at the right side of the legend area
+        let start_x = legend_area.right() - total_width - 16.0;
+        let y = legend_area.center().y;
+
+        // Draw separator line at top of legend area
+        painter.line_segment(
+            [
+                Pos2::new(legend_area.left(), legend_area.top()),
+                Pos2::new(legend_area.right(), legend_area.top()),
+            ],
+            Stroke::new(1.0, Color32::from_rgb(50, 50, 55)),
+        );
+
+        // Draw legend items
+        let mut x = start_x;
+
+        for (label, border_color) in items {
+            // Draw icon representing the state
+            let icon_rect = Rect::from_center_size(
+                Pos2::new(x + ICON_SIZE / 2.0, y),
+                egui::vec2(ICON_SIZE, ICON_SIZE),
+            );
+
+            match label {
+                "Pressed" => {
+                    // Partial fill with green border
+                    let fill_color = Color32::from_rgba_unmultiplied(150, 150, 150, 128);
+                    painter.rect_filled(icon_rect, 2.0, fill_color);
+                    painter.rect_stroke(
+                        icon_rect,
+                        2.0,
+                        Stroke::new(2.0, border_color),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                "Held" => {
+                    // Solid fill
+                    painter.rect_filled(icon_rect, 2.0, Color32::LIGHT_GRAY);
+                }
+                "Released" => {
+                    // Empty with red border
+                    painter.rect_stroke(
+                        icon_rect,
+                        2.0,
+                        Stroke::new(2.0, border_color),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                _ => {}
+            }
+
+            // Draw label text
+            painter.text(
+                Pos2::new(x + ICON_SIZE + ICON_SPACING, y),
+                egui::Align2::LEFT_CENTER,
+                label,
+                egui::FontId::proportional(11.0),
+                Color32::LIGHT_GRAY,
+            );
+
+            x += item_width + ITEM_SPACING;
+        }
     }
 }
