@@ -468,13 +468,17 @@ impl InputLogViewerApp {
         // Load settings from disk (or use defaults if loading fails)
         let settings = AppSettings::load();
 
+        // Create playback state with saved default speed
+        let mut playback = PlaybackState::new();
+        playback.set_speed(settings.get_default_speed());
+
         Self {
             state: AppState::NoFileLoaded,
             log: None,
             loaded_file_path: None,
             status_message: None,
             timeline_config: TimelineConfig::default(),
-            playback: PlaybackState::new(),
+            playback,
             filter: FilterState::new(),
             filter_popup_open: false,
             frame_input_value: 0,
@@ -483,7 +487,7 @@ impl InputLogViewerApp {
             bookmarks: BookmarkState::new(),
             auto_scroll: true,
             selection: SelectionState::new(),
-            loop_selection: false,
+            loop_selection: settings.loop_enabled,
             settings,
             settings_panel_open: false,
         }
@@ -592,6 +596,12 @@ impl InputLogViewerApp {
                 self.log = Some(log);
                 self.loaded_file_path = Some(path.clone());
                 self.state = AppState::Ready;
+
+                // Add to recent files and save settings
+                self.settings.add_recent_file(path.clone());
+                // Save settings to persist recent files (ignore errors silently)
+                let _ = self.settings.save();
+
                 self.status_message = Some(StatusMessage::new(
                     format!(
                         "Loaded: {} ({} frames, {} events)",
@@ -674,6 +684,15 @@ impl eframe::App for InputLogViewerApp {
 
         // Render drag and drop overlay when files are being hovered
         self.render_drag_overlay(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Save current settings (loop state, speed, etc.) on exit
+        self.settings.loop_enabled = self.loop_selection;
+        self.settings.set_default_speed(self.playback.speed);
+
+        // Save settings to disk (ignore errors on exit)
+        let _ = self.settings.save();
     }
 }
 
@@ -1384,6 +1403,8 @@ impl InputLogViewerApp {
         let mut should_close = false;
         let mut save_settings = false;
         let mut reset_settings = false;
+        let mut load_recent_file: Option<std::path::PathBuf> = None;
+        let mut clear_recent_files = false;
 
         egui::Window::new("Settings")
             .id(egui::Id::new("settings_panel"))
@@ -1405,6 +1426,58 @@ impl InputLogViewerApp {
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    // Playback Settings
+                    ui.collapsing("Playback Settings", |ui| {
+                        // Default Speed
+                        ui.horizontal(|ui| {
+                            ui.label("Default Speed:");
+                            let mut speed = self.settings.default_speed;
+                            if ui
+                                .add(egui::Slider::new(&mut speed, 0.1..=10.0).suffix("x"))
+                                .changed()
+                            {
+                                self.settings.set_default_speed(speed);
+                            }
+                        });
+
+                        // Loop Enabled by Default
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.settings.loop_enabled, "Enable loop by default");
+                        });
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Recent Files
+                    ui.collapsing("Recent Files", |ui| {
+                        if self.settings.recent_files.is_empty() {
+                            ui.label("No recent files");
+                        } else {
+                            for path in &self.settings.recent_files {
+                                let file_name = path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| path.to_string_lossy().to_string());
+
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .button(&file_name)
+                                        .on_hover_text(path.to_string_lossy())
+                                        .clicked()
+                                    {
+                                        load_recent_file = Some(path.clone());
+                                    }
+                                });
+                            }
+                            ui.add_space(4.0);
+                            if ui.button("Clear Recent Files").clicked() {
+                                clear_recent_files = true;
+                            }
+                        }
+                    });
+
+                    ui.add_space(4.0);
+
                     // Button State Colors
                     ui.collapsing("Button State Colors", |ui| {
                         Self::color_picker_row(
@@ -1594,6 +1667,22 @@ impl InputLogViewerApp {
                 "Settings reset to defaults",
                 StatusKind::Success,
             ));
+        }
+
+        // Handle recent files actions
+        if clear_recent_files {
+            self.settings.clear_recent_files();
+            let _ = self.settings.save();
+            self.status_message = Some(StatusMessage::new(
+                "Recent files cleared",
+                StatusKind::Success,
+            ));
+        }
+
+        if let Some(path) = load_recent_file {
+            // Close settings panel and load the file
+            self.settings_panel_open = false;
+            self.load_file(path);
         }
     }
 

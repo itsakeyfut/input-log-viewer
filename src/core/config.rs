@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Settings filename for persistence.
-const SETTINGS_FILENAME: &str = "settings.json";
+const SETTINGS_FILENAME: &str = "config.json";
+
+/// Maximum number of recent files to track.
+const MAX_RECENT_FILES: usize = 10;
 
 /// Color settings for the application UI.
 ///
@@ -298,11 +301,44 @@ impl ColorSettings {
     }
 }
 
-/// Application settings including color customization.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Application settings including color customization and user preferences.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
-    /// Color customization settings
+    /// Color customization settings.
     pub colors: ColorSettings,
+
+    /// Default playback speed (0.1 to 10.0).
+    #[serde(default = "default_speed")]
+    pub default_speed: f32,
+
+    /// Whether loop playback is enabled by default.
+    #[serde(default)]
+    pub loop_enabled: bool,
+
+    /// Recently opened files (most recent first).
+    #[serde(default)]
+    pub recent_files: Vec<PathBuf>,
+
+    /// Window size to restore on startup (width, height).
+    #[serde(default)]
+    pub window_size: Option<(f32, f32)>,
+}
+
+/// Default playback speed.
+fn default_speed() -> f32 {
+    1.0
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            colors: ColorSettings::default(),
+            default_speed: default_speed(),
+            loop_enabled: false,
+            recent_files: Vec::new(),
+            window_size: None,
+        }
+    }
 }
 
 impl AppSettings {
@@ -348,6 +384,46 @@ impl AppSettings {
     /// Reset all settings to defaults.
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// Add a file to the recent files list.
+    ///
+    /// The file is moved to the front of the list. If it already exists, it is
+    /// moved to the front. The list is capped at MAX_RECENT_FILES entries.
+    pub fn add_recent_file(&mut self, path: PathBuf) {
+        // Remove the path if it already exists (to move it to front)
+        self.recent_files.retain(|p| p != &path);
+
+        // Add to the front
+        self.recent_files.insert(0, path);
+
+        // Cap the list size
+        self.recent_files.truncate(MAX_RECENT_FILES);
+    }
+
+    /// Clear the recent files list.
+    pub fn clear_recent_files(&mut self) {
+        self.recent_files.clear();
+    }
+
+    /// Get the default playback speed, clamped to valid range.
+    pub fn get_default_speed(&self) -> f32 {
+        self.default_speed.clamp(0.1, 10.0)
+    }
+
+    /// Set the default playback speed.
+    pub fn set_default_speed(&mut self, speed: f32) {
+        self.default_speed = speed.clamp(0.1, 10.0);
+    }
+
+    /// Set the window size.
+    pub fn set_window_size(&mut self, width: f32, height: f32) {
+        self.window_size = Some((width, height));
+    }
+
+    /// Get the config file path for display purposes.
+    pub fn get_config_path() -> Option<PathBuf> {
+        Self::get_settings_path()
     }
 }
 
@@ -397,21 +473,133 @@ mod tests {
     fn test_app_settings_default() {
         let settings = AppSettings::default();
         assert_eq!(settings.colors, ColorSettings::default());
+        assert_eq!(settings.default_speed, 1.0);
+        assert!(!settings.loop_enabled);
+        assert!(settings.recent_files.is_empty());
+        assert!(settings.window_size.is_none());
     }
 
     #[test]
     fn test_app_settings_reset() {
         let mut settings = AppSettings::default();
         settings.colors.button_pressed = [0, 0, 0];
+        settings.default_speed = 2.0;
+        settings.loop_enabled = true;
+        settings.recent_files.push(PathBuf::from("/test/file.ilj"));
+        settings.window_size = Some((800.0, 600.0));
+
         settings.reset();
+
         assert_eq!(settings.colors.button_pressed, [76, 175, 80]);
+        assert_eq!(settings.default_speed, 1.0);
+        assert!(!settings.loop_enabled);
+        assert!(settings.recent_files.is_empty());
+        assert!(settings.window_size.is_none());
     }
 
     #[test]
     fn test_settings_serialization() {
-        let settings = AppSettings::default();
+        let mut settings = AppSettings::default();
+        settings.default_speed = 2.5;
+        settings.loop_enabled = true;
+        settings.recent_files.push(PathBuf::from("/test/file.ilj"));
+        settings.window_size = Some((1024.0, 768.0));
+
         let json = serde_json::to_string(&settings).unwrap();
         let restored: AppSettings = serde_json::from_str(&json).unwrap();
+
         assert_eq!(settings.colors, restored.colors);
+        assert_eq!(restored.default_speed, 2.5);
+        assert!(restored.loop_enabled);
+        assert_eq!(restored.recent_files.len(), 1);
+        assert_eq!(restored.window_size, Some((1024.0, 768.0)));
+    }
+
+    #[test]
+    fn test_recent_files_add() {
+        let mut settings = AppSettings::default();
+
+        // Add first file
+        settings.add_recent_file(PathBuf::from("/test/file1.ilj"));
+        assert_eq!(settings.recent_files.len(), 1);
+        assert_eq!(settings.recent_files[0], PathBuf::from("/test/file1.ilj"));
+
+        // Add second file (should be at front)
+        settings.add_recent_file(PathBuf::from("/test/file2.ilj"));
+        assert_eq!(settings.recent_files.len(), 2);
+        assert_eq!(settings.recent_files[0], PathBuf::from("/test/file2.ilj"));
+        assert_eq!(settings.recent_files[1], PathBuf::from("/test/file1.ilj"));
+
+        // Re-add first file (should move to front)
+        settings.add_recent_file(PathBuf::from("/test/file1.ilj"));
+        assert_eq!(settings.recent_files.len(), 2);
+        assert_eq!(settings.recent_files[0], PathBuf::from("/test/file1.ilj"));
+        assert_eq!(settings.recent_files[1], PathBuf::from("/test/file2.ilj"));
+    }
+
+    #[test]
+    fn test_recent_files_max_limit() {
+        let mut settings = AppSettings::default();
+
+        // Add more than MAX_RECENT_FILES files
+        for i in 0..15 {
+            settings.add_recent_file(PathBuf::from(format!("/test/file{}.ilj", i)));
+        }
+
+        // Should be capped at MAX_RECENT_FILES (10)
+        assert_eq!(settings.recent_files.len(), MAX_RECENT_FILES);
+        // Most recent should be at front
+        assert_eq!(settings.recent_files[0], PathBuf::from("/test/file14.ilj"));
+    }
+
+    #[test]
+    fn test_recent_files_clear() {
+        let mut settings = AppSettings::default();
+        settings.add_recent_file(PathBuf::from("/test/file1.ilj"));
+        settings.add_recent_file(PathBuf::from("/test/file2.ilj"));
+
+        settings.clear_recent_files();
+
+        assert!(settings.recent_files.is_empty());
+    }
+
+    #[test]
+    fn test_default_speed_clamping() {
+        let mut settings = AppSettings::default();
+
+        // Set speed within range
+        settings.set_default_speed(2.0);
+        assert_eq!(settings.get_default_speed(), 2.0);
+
+        // Set speed below minimum
+        settings.set_default_speed(0.01);
+        assert_eq!(settings.get_default_speed(), 0.1);
+
+        // Set speed above maximum
+        settings.set_default_speed(100.0);
+        assert_eq!(settings.get_default_speed(), 10.0);
+    }
+
+    #[test]
+    fn test_window_size() {
+        let mut settings = AppSettings::default();
+        assert!(settings.window_size.is_none());
+
+        settings.set_window_size(1280.0, 720.0);
+        assert_eq!(settings.window_size, Some((1280.0, 720.0)));
+    }
+
+    #[test]
+    fn test_backward_compatible_deserialization() {
+        // Test that old config files (without new fields) can still be loaded
+        let old_json = r#"{"colors":{"button_pressed":[76,175,80],"button_held":[211,211,211],"button_released":[244,67,54],"axis1d":[100,150,200],"axis2d":[150,100,200],"current_frame":[255,200,100],"selection":[150,80,200],"bookmark":[255,215,0],"search_current":[100,200,255],"search_other":[255,255,100],"background":[30,30,35],"header_background":[40,40,45],"label_background":[35,35,40],"grid":[50,50,55],"axis_center":[60,60,65],"scrollbar_track":[40,40,45],"scrollbar_thumb":[80,80,90],"scrollbar_border":[100,100,110],"text_header":[128,128,128],"text_label":[211,211,211],"text_dim":[105,105,105],"status_success":[76,175,80],"status_error":[244,67,54],"auto_scroll_enabled":[100,200,100],"loop_enabled":[180,100,220]}}"#;
+
+        let settings: AppSettings = serde_json::from_str(old_json).unwrap();
+
+        // New fields should have defaults
+        assert_eq!(settings.default_speed, 1.0);
+        assert!(!settings.loop_enabled);
+        assert!(settings.recent_files.is_empty());
+        assert!(settings.window_size.is_none());
     }
 }
