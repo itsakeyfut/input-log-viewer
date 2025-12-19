@@ -6,6 +6,7 @@
 use eframe::egui::{self, Color32, Painter, Pos2, Rect, Stroke};
 use std::collections::HashMap;
 
+use crate::core::config::ColorSettings;
 use crate::core::filter::FilterState;
 use crate::core::log::{Bookmark, ButtonState, InputEvent, InputKind, InputLog, InputMapping};
 use crate::core::search::SearchResult;
@@ -99,6 +100,8 @@ pub struct TimelineRenderer<'a> {
     config: &'a TimelineConfig,
     /// Filter state for input visibility
     filter: &'a FilterState,
+    /// Color settings for UI elements
+    colors: &'a ColorSettings,
     /// Search results for highlighting (optional)
     search_results: Option<&'a SearchResult>,
     /// Bookmarks to display on the timeline (optional)
@@ -119,7 +122,12 @@ pub struct TimelineRenderer<'a> {
 
 impl<'a> TimelineRenderer<'a> {
     /// Create a new timeline renderer for the given log.
-    pub fn new(log: &'a InputLog, config: &'a TimelineConfig, filter: &'a FilterState) -> Self {
+    pub fn new(
+        log: &'a InputLog,
+        config: &'a TimelineConfig,
+        filter: &'a FilterState,
+        colors: &'a ColorSettings,
+    ) -> Self {
         // Get effective mappings (includes fallback entries for unmapped IDs)
         let effective_mappings = log.get_effective_mappings();
 
@@ -158,6 +166,7 @@ impl<'a> TimelineRenderer<'a> {
             log,
             config,
             filter,
+            colors,
             search_results: None,
             bookmarks: None,
             selection: None,
@@ -194,7 +203,7 @@ impl<'a> TimelineRenderer<'a> {
             .get(&id)
             .and_then(|&idx| self.effective_mappings[idx].color)
             .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
-            .unwrap_or(Color32::LIGHT_GRAY)
+            .unwrap_or(self.colors.text_label_color())
     }
 
     /// Get the row index for an input ID.
@@ -548,7 +557,7 @@ impl<'a> TimelineRenderer<'a> {
     /// Draw the horizontal scrollbar.
     fn draw_scrollbar(&self, painter: &Painter, scrollbar_rect: Rect) {
         // Draw track background
-        painter.rect_filled(scrollbar_rect, 2.0, Color32::from_rgb(40, 40, 45));
+        painter.rect_filled(scrollbar_rect, 2.0, self.colors.scrollbar_track_color());
 
         // Calculate thumb position and size
         let track_width = scrollbar_rect.width();
@@ -573,13 +582,13 @@ impl<'a> TimelineRenderer<'a> {
             Pos2::new(thumb_x, scrollbar_rect.top() + 2.0),
             egui::vec2(thumb_width, scrollbar_rect.height() - 4.0),
         );
-        painter.rect_filled(thumb_rect, 4.0, Color32::from_rgb(80, 80, 90));
+        painter.rect_filled(thumb_rect, 4.0, self.colors.scrollbar_thumb_color());
 
         // Draw thumb border on hover (simplified - always show slight border)
         painter.rect_stroke(
             thumb_rect,
             4.0,
-            Stroke::new(1.0, Color32::from_rgb(100, 100, 110)),
+            Stroke::new(1.0, self.colors.scrollbar_border_color()),
             egui::StrokeKind::Inside,
         );
     }
@@ -587,13 +596,13 @@ impl<'a> TimelineRenderer<'a> {
     /// Draw the background and border.
     fn draw_background(&self, painter: &Painter, rect: Rect) {
         // Fill background
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(30, 30, 35));
+        painter.rect_filled(rect, 0.0, self.colors.background_color());
 
         // Draw border
         painter.rect_stroke(
             rect,
             0.0,
-            Stroke::new(1.0, Color32::DARK_GRAY),
+            Stroke::new(1.0, self.colors.grid_color()),
             egui::StrokeKind::Inside,
         );
     }
@@ -607,7 +616,7 @@ impl<'a> TimelineRenderer<'a> {
         );
 
         // Draw header background
-        painter.rect_filled(header_rect, 0.0, Color32::from_rgb(40, 40, 45));
+        painter.rect_filled(header_rect, 0.0, self.colors.header_background_color());
 
         // Draw frame numbers at regular intervals
         let interval = self.calculate_frame_interval();
@@ -629,7 +638,7 @@ impl<'a> TimelineRenderer<'a> {
                     egui::Align2::CENTER_CENTER,
                     format!("{}", frame),
                     egui::FontId::proportional(10.0),
-                    Color32::GRAY,
+                    self.colors.text_header_color(),
                 );
             }
 
@@ -642,7 +651,7 @@ impl<'a> TimelineRenderer<'a> {
                 Pos2::new(rect.left(), rect.top() + HEADER_HEIGHT),
                 Pos2::new(rect.right(), rect.top() + HEADER_HEIGHT),
             ],
-            Stroke::new(1.0, Color32::DARK_GRAY),
+            Stroke::new(1.0, self.colors.grid_color()),
         );
     }
 
@@ -673,7 +682,7 @@ impl<'a> TimelineRenderer<'a> {
         );
 
         // Draw label column background
-        painter.rect_filled(label_rect, 0.0, Color32::from_rgb(35, 35, 40));
+        painter.rect_filled(label_rect, 0.0, self.colors.label_background_color());
 
         // Draw separator line
         painter.line_segment(
@@ -681,7 +690,7 @@ impl<'a> TimelineRenderer<'a> {
                 Pos2::new(rect.left() + LABEL_WIDTH, rect.top()),
                 Pos2::new(rect.left() + LABEL_WIDTH, rect.bottom()),
             ],
-            Stroke::new(1.0, Color32::DARK_GRAY),
+            Stroke::new(1.0, self.colors.grid_color()),
         );
 
         // Draw each row label (using filtered visible mappings)
@@ -695,7 +704,7 @@ impl<'a> TimelineRenderer<'a> {
                 let color = mapping
                     .color
                     .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
-                    .unwrap_or(Color32::LIGHT_GRAY);
+                    .unwrap_or(self.colors.text_label_color());
 
                 // Draw color indicator
                 let indicator_rect = Rect::from_min_size(
@@ -710,7 +719,7 @@ impl<'a> TimelineRenderer<'a> {
                     egui::Align2::LEFT_CENTER,
                     &mapping.name,
                     egui::FontId::proportional(12.0),
-                    Color32::LIGHT_GRAY,
+                    self.colors.text_label_color(),
                 );
             }
         }
@@ -719,13 +728,14 @@ impl<'a> TimelineRenderer<'a> {
     /// Draw the grid lines.
     fn draw_grid(&self, painter: &Painter, rect: Rect, timeline_rect: Rect, num_rows: usize) {
         let frame_width = timeline_rect.width() / self.config.visible_frames as f32;
+        let grid_color = self.colors.grid_color();
 
         // Draw horizontal row separators
         for i in 1..num_rows {
             let y = rect.top() + HEADER_HEIGHT + (i as f32 * ROW_HEIGHT);
             painter.line_segment(
                 [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-                Stroke::new(0.5, Color32::from_rgb(50, 50, 55)),
+                Stroke::new(0.5, grid_color),
             );
         }
 
@@ -747,7 +757,7 @@ impl<'a> TimelineRenderer<'a> {
                         Pos2::new(x, rect.top() + HEADER_HEIGHT),
                         Pos2::new(x, rect.bottom()),
                     ],
-                    Stroke::new(0.5, Color32::from_rgb(50, 50, 55)),
+                    Stroke::new(0.5, grid_color),
                 );
             }
 
@@ -823,7 +833,7 @@ impl<'a> TimelineRenderer<'a> {
         match state {
             ButtonState::Pressed => {
                 // Green border with partial fill to indicate button press start
-                let pressed_green = Color32::from_rgb(76, 175, 80);
+                let pressed_color = self.colors.button_pressed_color();
 
                 // Draw partial fill (50% opacity of the mapping color)
                 let fill_color =
@@ -834,7 +844,7 @@ impl<'a> TimelineRenderer<'a> {
                 painter.rect_stroke(
                     cell_rect,
                     2.0,
-                    Stroke::new(2.0, pressed_green),
+                    Stroke::new(2.0, pressed_color),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -844,13 +854,13 @@ impl<'a> TimelineRenderer<'a> {
             }
             ButtonState::Released => {
                 // Red border with empty interior for released state
-                let released_red = Color32::from_rgb(244, 67, 54);
+                let released_color = self.colors.button_released_color();
 
                 // Draw empty rectangle with red border
                 painter.rect_stroke(
                     cell_rect,
                     2.0,
-                    Stroke::new(2.0, released_red),
+                    Stroke::new(2.0, released_color),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -918,7 +928,7 @@ impl<'a> TimelineRenderer<'a> {
                 Pos2::new(cell_center_x, row_top + CELL_PADDING),
                 Pos2::new(cell_center_x, row_top + ROW_HEIGHT - CELL_PADDING),
             ],
-            Stroke::new(0.5, Color32::from_rgb(60, 60, 65)),
+            Stroke::new(0.5, self.colors.axis_center_color()),
         );
     }
 
@@ -1005,14 +1015,14 @@ impl<'a> TimelineRenderer<'a> {
         let (fill_color, stroke_color) = if self.selection_dragging {
             // Lighter color while dragging
             (
-                Color32::from_rgba_unmultiplied(180, 100, 220, 30),
-                Color32::from_rgba_unmultiplied(180, 100, 220, 100),
+                self.colors.selection_color_alpha(30),
+                self.colors.selection_color_alpha(100),
             )
         } else {
             // Solid color when selection is complete
             (
-                Color32::from_rgba_unmultiplied(150, 80, 200, 40),
-                Color32::from_rgba_unmultiplied(150, 80, 200, 150),
+                self.colors.selection_color_alpha(40),
+                self.colors.selection_color_alpha(150),
             )
         };
 
@@ -1041,12 +1051,12 @@ impl<'a> TimelineRenderer<'a> {
                 egui::Align2::CENTER_CENTER,
                 selection_text,
                 egui::FontId::proportional(10.0),
-                Color32::from_rgb(180, 100, 220),
+                self.colors.selection_color(),
             );
         }
 
         // Draw edge markers at selection boundaries
-        let marker_color = Color32::from_rgb(150, 80, 200);
+        let marker_color = self.colors.selection_color();
 
         // Left edge marker
         if visible_sel_start == sel_start && x_start >= timeline_rect.left() {
@@ -1096,13 +1106,13 @@ impl<'a> TimelineRenderer<'a> {
             // Use different colors for current vs other matches
             let (fill_color, stroke_color) = if is_current {
                 (
-                    Color32::from_rgba_unmultiplied(100, 200, 255, 40),
-                    Color32::from_rgba_unmultiplied(100, 200, 255, 150),
+                    self.colors.search_current_color_alpha(40),
+                    self.colors.search_current_color_alpha(150),
                 )
             } else {
                 (
-                    Color32::from_rgba_unmultiplied(255, 255, 100, 25),
-                    Color32::from_rgba_unmultiplied(255, 255, 100, 80),
+                    self.colors.search_other_color_alpha(25),
+                    self.colors.search_other_color_alpha(80),
                 )
             };
 
@@ -1126,7 +1136,7 @@ impl<'a> TimelineRenderer<'a> {
                     Pos2::new(x + frame_width / 2.0 - marker_width / 2.0, rect.top() + 2.0),
                     egui::vec2(marker_width, 4.0),
                 );
-                painter.rect_filled(marker_rect, 2.0, Color32::from_rgb(100, 200, 255));
+                painter.rect_filled(marker_rect, 2.0, self.colors.search_current_color());
             }
         }
     }
@@ -1142,8 +1152,8 @@ impl<'a> TimelineRenderer<'a> {
         let end_frame = start_frame + self.config.visible_frames;
         let frame_width = timeline_rect.width() / self.config.visible_frames as f32;
 
-        // Bookmark marker color (gold/yellow)
-        let bookmark_color = Color32::from_rgb(255, 215, 0);
+        // Bookmark marker color
+        let bookmark_color = self.colors.bookmark_color();
 
         // Draw marker for each bookmark in the visible range
         for bookmark in bookmarks {
@@ -1165,7 +1175,7 @@ impl<'a> TimelineRenderer<'a> {
             );
 
             // Draw a subtle vertical line from header to the content area
-            let line_color = Color32::from_rgba_unmultiplied(255, 215, 0, 80);
+            let line_color = self.colors.bookmark_color_alpha(80);
             painter.line_segment(
                 [
                     Pos2::new(x, rect.top() + HEADER_HEIGHT),
@@ -1192,7 +1202,7 @@ impl<'a> TimelineRenderer<'a> {
             + frame_width / 2.0;
 
         // Draw the vertical highlight line (full height from header to bottom)
-        let highlight_color = Color32::from_rgba_unmultiplied(255, 200, 100, 180);
+        let highlight_color = self.colors.current_frame_color_alpha(180);
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
             Stroke::new(2.0, highlight_color),
@@ -1224,9 +1234,9 @@ impl<'a> TimelineRenderer<'a> {
 
         // Legend items
         let items = [
-            ("Pressed", Color32::from_rgb(76, 175, 80)), // Green
-            ("Held", Color32::LIGHT_GRAY),
-            ("Released", Color32::from_rgb(244, 67, 54)), // Red
+            ("Pressed", self.colors.button_pressed_color()),
+            ("Held", self.colors.button_held_color()),
+            ("Released", self.colors.button_released_color()),
         ];
 
         // Calculate total width of legend items
@@ -1244,7 +1254,7 @@ impl<'a> TimelineRenderer<'a> {
                 Pos2::new(legend_area.left(), legend_area.top()),
                 Pos2::new(legend_area.right(), legend_area.top()),
             ],
-            Stroke::new(1.0, Color32::from_rgb(50, 50, 55)),
+            Stroke::new(1.0, self.colors.grid_color()),
         );
 
         // Draw legend items
@@ -1271,7 +1281,7 @@ impl<'a> TimelineRenderer<'a> {
                 }
                 "Held" => {
                     // Solid fill
-                    painter.rect_filled(icon_rect, 2.0, Color32::LIGHT_GRAY);
+                    painter.rect_filled(icon_rect, 2.0, self.colors.button_held_color());
                 }
                 "Released" => {
                     // Empty with red border
@@ -1291,7 +1301,7 @@ impl<'a> TimelineRenderer<'a> {
                 egui::Align2::LEFT_CENTER,
                 label,
                 egui::FontId::proportional(11.0),
-                Color32::LIGHT_GRAY,
+                self.colors.text_label_color(),
             );
 
             x += item_width + ITEM_SPACING;
@@ -1316,7 +1326,7 @@ impl<'a> TimelineRenderer<'a> {
             egui::Align2::LEFT_CENTER,
             zoom_text,
             egui::FontId::proportional(11.0),
-            Color32::GRAY,
+            self.colors.text_header_color(),
         );
     }
 }

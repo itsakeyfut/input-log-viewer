@@ -6,6 +6,7 @@
 use eframe::egui;
 use std::path::PathBuf;
 
+use crate::core::config::AppSettings;
 use crate::core::filter::FilterState;
 use crate::core::log::{Bookmark, ButtonState, InputKind, InputLog};
 use crate::core::parser;
@@ -455,11 +456,18 @@ pub struct InputLogViewerApp {
     selection: SelectionState,
     /// Whether to loop playback within the selected range
     loop_selection: bool,
+    /// Application settings (colors, etc.)
+    settings: AppSettings,
+    /// Whether the settings panel is currently open
+    settings_panel_open: bool,
 }
 
 impl InputLogViewerApp {
     /// Create a new application instance.
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // Load settings from disk (or use defaults if loading fails)
+        let settings = AppSettings::load();
+
         Self {
             state: AppState::NoFileLoaded,
             log: None,
@@ -476,6 +484,8 @@ impl InputLogViewerApp {
             auto_scroll: true,
             selection: SelectionState::new(),
             loop_selection: false,
+            settings,
+            settings_panel_open: false,
         }
     }
 
@@ -808,6 +818,18 @@ impl InputLogViewerApp {
                     }
                 });
 
+                ui.separator();
+
+                // Settings button (always available)
+                let settings_button_text = if self.settings_panel_open {
+                    "⚙ Settings ▲"
+                } else {
+                    "⚙ Settings ▼"
+                };
+                if ui.button(settings_button_text).clicked() {
+                    self.settings_panel_open = !self.settings_panel_open;
+                }
+
                 // Show status message in toolbar (right-aligned)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.render_status_message(ui);
@@ -828,6 +850,11 @@ impl InputLogViewerApp {
         // Render bookmarks panel if open
         if self.bookmarks.panel_open && toolbar_enabled {
             self.render_bookmarks_panel(ctx);
+        }
+
+        // Render settings panel if open
+        if self.settings_panel_open {
+            self.render_settings_panel(ctx);
         }
     }
 
@@ -1126,6 +1153,7 @@ impl InputLogViewerApp {
             .map(|l| l.metadata.frame_count)
             .unwrap_or(0);
         let current_frame = self.playback.current_frame;
+        let current_frame_color = self.settings.colors.current_frame_color();
 
         egui::Window::new("Bookmarks")
             .id(egui::Id::new("bookmarks_panel"))
@@ -1201,7 +1229,7 @@ impl InputLogViewerApp {
                                     let frame_button = if is_current {
                                         egui::Button::new(
                                             egui::RichText::new(&frame_text)
-                                                .color(egui::Color32::from_rgb(255, 200, 100))
+                                                .color(current_frame_color)
                                                 .strong(),
                                         )
                                     } else {
@@ -1351,6 +1379,245 @@ impl InputLogViewerApp {
         }
     }
 
+    /// Render the settings panel window with color pickers.
+    fn render_settings_panel(&mut self, ctx: &egui::Context) {
+        let mut should_close = false;
+        let mut save_settings = false;
+        let mut reset_settings = false;
+
+        egui::Window::new("Settings")
+            .id(egui::Id::new("settings_panel"))
+            .collapsible(false)
+            .resizable(true)
+            .default_width(400.0)
+            .default_height(500.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                // Header with close button
+                ui.horizontal(|ui| {
+                    ui.heading("⚙ Settings");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("✕").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+                ui.separator();
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    // Button State Colors
+                    ui.collapsing("Button State Colors", |ui| {
+                        Self::color_picker_row(
+                            ui,
+                            "Pressed",
+                            &mut self.settings.colors.button_pressed,
+                        );
+                        Self::color_picker_row(ui, "Held", &mut self.settings.colors.button_held);
+                        Self::color_picker_row(
+                            ui,
+                            "Released",
+                            &mut self.settings.colors.button_released,
+                        );
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Input Type Colors
+                    ui.collapsing("Input Type Colors (Default)", |ui| {
+                        Self::color_picker_row(ui, "Axis1D", &mut self.settings.colors.axis1d);
+                        Self::color_picker_row(ui, "Axis2D", &mut self.settings.colors.axis2d);
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Highlight Colors
+                    ui.collapsing("Highlight Colors", |ui| {
+                        Self::color_picker_row(
+                            ui,
+                            "Current Frame",
+                            &mut self.settings.colors.current_frame,
+                        );
+                        Self::color_picker_row(
+                            ui,
+                            "Selection",
+                            &mut self.settings.colors.selection,
+                        );
+                        Self::color_picker_row(ui, "Bookmark", &mut self.settings.colors.bookmark);
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Search Result Colors
+                    ui.collapsing("Search Result Colors", |ui| {
+                        Self::color_picker_row(
+                            ui,
+                            "Current Match",
+                            &mut self.settings.colors.search_current,
+                        );
+                        Self::color_picker_row(
+                            ui,
+                            "Other Matches",
+                            &mut self.settings.colors.search_other,
+                        );
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Background Colors
+                    ui.collapsing("Background Colors", |ui| {
+                        Self::color_picker_row(
+                            ui,
+                            "Timeline",
+                            &mut self.settings.colors.background,
+                        );
+                        Self::color_picker_row(
+                            ui,
+                            "Header",
+                            &mut self.settings.colors.header_background,
+                        );
+                        Self::color_picker_row(
+                            ui,
+                            "Label Column",
+                            &mut self.settings.colors.label_background,
+                        );
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Grid Colors
+                    ui.collapsing("Grid Colors", |ui| {
+                        Self::color_picker_row(ui, "Grid Lines", &mut self.settings.colors.grid);
+                        Self::color_picker_row(
+                            ui,
+                            "Axis Center",
+                            &mut self.settings.colors.axis_center,
+                        );
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Scrollbar Colors
+                    ui.collapsing("Scrollbar Colors", |ui| {
+                        Self::color_picker_row(
+                            ui,
+                            "Track",
+                            &mut self.settings.colors.scrollbar_track,
+                        );
+                        Self::color_picker_row(
+                            ui,
+                            "Thumb",
+                            &mut self.settings.colors.scrollbar_thumb,
+                        );
+                        Self::color_picker_row(
+                            ui,
+                            "Border",
+                            &mut self.settings.colors.scrollbar_border,
+                        );
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Text Colors
+                    ui.collapsing("Text Colors", |ui| {
+                        Self::color_picker_row(ui, "Header", &mut self.settings.colors.text_header);
+                        Self::color_picker_row(ui, "Label", &mut self.settings.colors.text_label);
+                        Self::color_picker_row(ui, "Dim", &mut self.settings.colors.text_dim);
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Status Colors
+                    ui.collapsing("Status Colors", |ui| {
+                        Self::color_picker_row(
+                            ui,
+                            "Success",
+                            &mut self.settings.colors.status_success,
+                        );
+                        Self::color_picker_row(ui, "Error", &mut self.settings.colors.status_error);
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Control Colors
+                    ui.collapsing("Control Colors", |ui| {
+                        Self::color_picker_row(
+                            ui,
+                            "Auto-Scroll On",
+                            &mut self.settings.colors.auto_scroll_enabled,
+                        );
+                        Self::color_picker_row(
+                            ui,
+                            "Loop On",
+                            &mut self.settings.colors.loop_enabled,
+                        );
+                    });
+                });
+
+                ui.separator();
+
+                // Bottom action buttons
+                ui.horizontal(|ui| {
+                    if ui.button("Save Settings").clicked() {
+                        save_settings = true;
+                    }
+                    if ui.button("Reset to Defaults").clicked() {
+                        reset_settings = true;
+                    }
+                });
+            });
+
+        // Handle actions
+        if should_close {
+            self.settings_panel_open = false;
+        }
+
+        if save_settings {
+            match self.settings.save() {
+                Ok(()) => {
+                    self.status_message = Some(StatusMessage::new(
+                        "Settings saved successfully",
+                        StatusKind::Success,
+                    ));
+                }
+                Err(e) => {
+                    self.status_message = Some(StatusMessage::new(
+                        format!("Failed to save settings: {}", e),
+                        StatusKind::Error,
+                    ));
+                }
+            }
+        }
+
+        if reset_settings {
+            self.settings.reset();
+            self.status_message = Some(StatusMessage::new(
+                "Settings reset to defaults",
+                StatusKind::Success,
+            ));
+        }
+    }
+
+    /// Helper function to render a color picker row.
+    fn color_picker_row(ui: &mut egui::Ui, label: &str, color: &mut [u8; 3]) {
+        ui.horizontal(|ui| {
+            ui.label(format!("{:16}", label));
+
+            // Convert u8 array to egui color
+            let mut egui_color = egui::Color32::from_rgb(color[0], color[1], color[2]);
+
+            // Use egui's built-in color picker button
+            if ui.color_edit_button_srgba(&mut egui_color).changed() {
+                // Convert back to u8 array
+                color[0] = egui_color.r();
+                color[1] = egui_color.g();
+                color[2] = egui_color.b();
+            }
+
+            // Show hex value
+            ui.label(format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2]));
+        });
+    }
+
     /// Execute the search based on current search state.
     fn perform_search(&mut self) {
         if let Some(ref log) = self.log {
@@ -1430,17 +1697,23 @@ impl InputLogViewerApp {
 
         // Semi-transparent background
         let bg_color = if has_valid_extension {
-            egui::Color32::from_rgba_unmultiplied(76, 175, 80, 180) // Green
+            crate::core::config::ColorSettings::to_color32_alpha(
+                self.settings.colors.status_success,
+                180,
+            )
         } else {
-            egui::Color32::from_rgba_unmultiplied(244, 67, 54, 180) // Red
+            crate::core::config::ColorSettings::to_color32_alpha(
+                self.settings.colors.status_error,
+                180,
+            )
         };
         painter.rect_filled(screen_rect, 0.0, bg_color);
 
         // Border
         let border_color = if has_valid_extension {
-            egui::Color32::from_rgb(76, 175, 80)
+            self.settings.colors.status_success_color()
         } else {
-            egui::Color32::from_rgb(244, 67, 54)
+            self.settings.colors.status_error_color()
         };
         painter.rect_stroke(
             screen_rect.shrink(4.0),
@@ -1484,8 +1757,8 @@ impl InputLogViewerApp {
         // Extract message info before rendering to avoid borrow issues
         let msg_info = self.status_message.as_ref().map(|msg| {
             let color = match msg.kind {
-                StatusKind::Success => egui::Color32::from_rgb(76, 175, 80), // Green
-                StatusKind::Error => egui::Color32::from_rgb(244, 67, 54),   // Red
+                StatusKind::Success => self.settings.colors.status_success_color(),
+                StatusKind::Error => self.settings.colors.status_error_color(),
             };
             (color, msg.text.clone())
         });
@@ -1545,6 +1818,7 @@ impl InputLogViewerApp {
                     auto_scroll,
                     self.selection.get_selection(),
                     self.loop_selection,
+                    &self.settings.colors,
                 );
                 action = renderer.render(ui);
             });
@@ -1809,7 +2083,12 @@ impl InputLogViewerApp {
         // Render the timeline using TimelineRenderer with filter, search results, bookmarks, and selection
         // Handle view action if triggered
         let view_action = if let Some(ref log) = self.log {
-            let mut renderer = TimelineRenderer::new(log, &self.timeline_config, &self.filter);
+            let mut renderer = TimelineRenderer::new(
+                log,
+                &self.timeline_config,
+                &self.filter,
+                &self.settings.colors,
+            );
             if self.search.has_searched && !self.search.results.is_empty() {
                 renderer = renderer.with_search_results(&self.search.results);
             }

@@ -5,6 +5,7 @@
 
 use eframe::egui;
 
+use crate::core::config::ColorSettings;
 use crate::core::log::Bookmark;
 use crate::core::playback::{PlaybackState, SPEED_OPTIONS};
 use crate::gui::timeline::{MAX_VISIBLE_FRAMES, MIN_VISIBLE_FRAMES};
@@ -84,6 +85,8 @@ pub struct ControlsRenderer<'a> {
     selection: Option<(u64, u64)>,
     /// Whether loop selection is enabled
     loop_selection: bool,
+    /// Color settings for UI elements
+    colors: &'a ColorSettings,
 }
 
 impl<'a> ControlsRenderer<'a> {
@@ -101,6 +104,7 @@ impl<'a> ControlsRenderer<'a> {
         auto_scroll: bool,
         selection: Option<(u64, u64)>,
         loop_selection: bool,
+        colors: &'a ColorSettings,
     ) -> Self {
         // Pre-compute boundary states for button disabling
         let at_start = playback.is_at_start();
@@ -122,6 +126,7 @@ impl<'a> ControlsRenderer<'a> {
             auto_scroll,
             selection,
             loop_selection,
+            colors,
         }
     }
 
@@ -332,10 +337,12 @@ impl<'a> ControlsRenderer<'a> {
 
             let button = if self.auto_scroll {
                 egui::Button::new(
-                    egui::RichText::new(toggle_text).color(egui::Color32::from_rgb(100, 200, 100)),
+                    egui::RichText::new(toggle_text).color(self.colors.auto_scroll_enabled_color()),
                 )
             } else {
-                egui::Button::new(egui::RichText::new(toggle_text).color(egui::Color32::GRAY))
+                egui::Button::new(
+                    egui::RichText::new(toggle_text).color(self.colors.text_dim_color()),
+                )
             };
 
             if ui
@@ -365,12 +372,14 @@ impl<'a> ControlsRenderer<'a> {
 
             let loop_button = if self.loop_selection && has_selection {
                 egui::Button::new(
-                    egui::RichText::new(loop_text).color(egui::Color32::from_rgb(180, 100, 220)),
+                    egui::RichText::new(loop_text).color(self.colors.loop_enabled_color()),
                 )
             } else if has_selection {
                 egui::Button::new(loop_text)
             } else {
-                egui::Button::new(egui::RichText::new(loop_text).color(egui::Color32::DARK_GRAY))
+                egui::Button::new(
+                    egui::RichText::new(loop_text).color(self.colors.text_dim_color()),
+                )
             };
 
             if ui
@@ -389,7 +398,7 @@ impl<'a> ControlsRenderer<'a> {
             if let Some((start, end)) = self.selection {
                 ui.label(
                     egui::RichText::new(format!("F{}-F{}", start, end))
-                        .color(egui::Color32::from_rgb(180, 100, 220)),
+                        .color(self.colors.loop_enabled_color()),
                 );
 
                 // Clear selection button
@@ -512,7 +521,7 @@ impl<'a> ControlsRenderer<'a> {
                                 let button = if is_current {
                                     egui::Button::new(
                                         egui::RichText::new(&label)
-                                            .color(egui::Color32::from_rgb(255, 200, 100)),
+                                            .color(self.colors.current_frame_color()),
                                     )
                                 } else {
                                     egui::Button::new(&label)
