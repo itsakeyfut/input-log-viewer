@@ -237,6 +237,16 @@ impl ColorSettings {
         Self::to_color32(self.axis_center)
     }
 
+    /// Get axis1d color as Color32.
+    pub fn axis1d_color(&self) -> Color32 {
+        Self::to_color32(self.axis1d)
+    }
+
+    /// Get axis2d color as Color32.
+    pub fn axis2d_color(&self) -> Color32 {
+        Self::to_color32(self.axis2d)
+    }
+
     /// Get scrollbar track color as Color32.
     pub fn scrollbar_track_color(&self) -> Color32 {
         Self::to_color32(self.scrollbar_track)
