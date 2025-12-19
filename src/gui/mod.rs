@@ -5,6 +5,7 @@
 
 mod app;
 mod controls;
+mod dialogs;
 mod timeline;
 
 pub use app::InputLogViewerApp;

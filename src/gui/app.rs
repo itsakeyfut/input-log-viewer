@@ -7,6 +7,7 @@ use eframe::egui;
 use std::path::PathBuf;
 
 use crate::core::config::AppSettings;
+use crate::core::error::{self, AppError as DetailedAppError};
 use crate::core::filter::FilterState;
 use crate::core::log::{Bookmark, ButtonState, InputKind, InputLog};
 use crate::core::parser;
@@ -14,6 +15,7 @@ use crate::core::playback::PlaybackState;
 use crate::core::search::{SearchQuery, SearchResult, find_matches};
 
 use super::controls::{ControlAction, ControlsRenderer};
+use super::dialogs::{ErrorDialogAction, ErrorDialogRenderer, ErrorDialogState};
 use super::timeline::{TimelineConfig, TimelineRenderer, ViewAction};
 
 /// Error information for the error state.
@@ -460,6 +462,10 @@ pub struct InputLogViewerApp {
     settings: AppSettings,
     /// Whether the settings panel is currently open
     settings_panel_open: bool,
+    /// Error dialog state for displaying detailed errors
+    error_dialog: ErrorDialogState,
+    /// Path to retry loading if the user clicks Retry in the error dialog
+    retry_path: Option<PathBuf>,
 }
 
 impl InputLogViewerApp {
@@ -490,6 +496,8 @@ impl InputLogViewerApp {
             loop_selection: settings.loop_enabled,
             settings,
             settings_panel_open: false,
+            error_dialog: ErrorDialogState::new(),
+            retry_path: None,
         }
     }
 
@@ -523,9 +531,10 @@ impl InputLogViewerApp {
                     self.load_file(path);
                 }
                 _ => {
-                    self.set_error(
-                        "Unsupported file format. Please drop an .ilj or .ilb file.".to_string(),
-                    );
+                    self.show_detailed_error(DetailedAppError::UnsupportedFileType {
+                        path,
+                        expected: vec![".ilj".to_string(), ".ilb".to_string()],
+                    });
                 }
             }
         }
@@ -550,32 +559,47 @@ impl InputLogViewerApp {
     /// - `.ilj` files are parsed as JSON
     /// - `.ilb` files are parsed as binary
     fn load_file(&mut self, path: PathBuf) {
+        // Store the path for retry functionality
+        self.retry_path = Some(path.clone());
+
         // Determine format from extension
         let extension = path
             .extension()
             .and_then(|ext| ext.to_str())
             .map(|s| s.to_lowercase());
 
-        let parse_result = match extension.as_deref() {
+        // First check for unsupported extension
+        if !matches!(extension.as_deref(), Some("ilj") | Some("ilb")) {
+            self.show_detailed_error(DetailedAppError::UnsupportedFileType {
+                path,
+                expected: vec![".ilj".to_string(), ".ilb".to_string()],
+            });
+            return;
+        }
+
+        // Try to read and parse the file
+        let parse_result: Result<InputLog, DetailedAppError> = match extension.as_deref() {
             Some("ilj") => {
                 // JSON format - read as string
-                std::fs::read_to_string(&path)
-                    .map_err(|e| format!("Failed to read file: {}", e))
-                    .and_then(|content| {
-                        parser::parse_json(&content).map_err(|e| format!("Parse error: {}", e))
-                    })
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => match parser::parse_json(&content) {
+                        Ok(log) => Ok(log),
+                        Err(e) => Err(error::from_parse_error(Some(path.clone()), &e)),
+                    },
+                    Err(e) => Err(error::from_io_error(path.clone(), e)),
+                }
             }
             Some("ilb") => {
                 // Binary format - read as bytes
-                std::fs::read(&path)
-                    .map_err(|e| format!("Failed to read file: {}", e))
-                    .and_then(|data| {
-                        parser::parse_binary(&data).map_err(|e| format!("Parse error: {}", e))
-                    })
+                match std::fs::read(&path) {
+                    Ok(data) => match parser::parse_binary(&data) {
+                        Ok(log) => Ok(log),
+                        Err(e) => Err(error::from_parse_error(Some(path.clone()), &e)),
+                    },
+                    Err(e) => Err(error::from_io_error(path.clone(), e)),
+                }
             }
-            _ => {
-                Err("Unsupported file format. Please use .ilj (JSON) or .ilb (binary).".to_string())
-            }
+            _ => unreachable!(), // Already handled above
         };
 
         match parse_result {
@@ -596,6 +620,8 @@ impl InputLogViewerApp {
                 self.log = Some(log);
                 self.loaded_file_path = Some(path.clone());
                 self.state = AppState::Ready;
+                // Clear retry path on success
+                self.retry_path = None;
 
                 // Add to recent files and save settings
                 self.settings.add_recent_file(path.clone());
@@ -615,15 +641,23 @@ impl InputLogViewerApp {
                 ));
             }
             Err(e) => {
-                self.set_error(e);
+                self.show_detailed_error(e);
             }
         }
     }
 
-    /// Set an error state and display an error message.
-    fn set_error(&mut self, message: String) {
-        self.state = AppState::Error(AppError::recoverable(message.clone()));
-        self.status_message = Some(StatusMessage::new(message, StatusKind::Error));
+    /// Show a detailed error in the error dialog.
+    fn show_detailed_error(&mut self, error: DetailedAppError) {
+        let brief = error.brief_description();
+
+        // Show in error dialog
+        self.error_dialog.show(error);
+
+        // Also set the app state to Error for UI state management
+        self.state = AppState::Error(AppError::recoverable(brief.clone()));
+
+        // Show a brief status message as well
+        self.status_message = Some(StatusMessage::new(brief, StatusKind::Error));
     }
 
     /// Clear error state and return to appropriate state.
@@ -684,6 +718,9 @@ impl eframe::App for InputLogViewerApp {
 
         // Render drag and drop overlay when files are being hovered
         self.render_drag_overlay(ctx);
+
+        // Render error dialog (on top of everything else)
+        self.render_error_dialog(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -2288,6 +2325,32 @@ impl InputLogViewerApp {
             egui::FontId::proportional(16.0),
             egui::Color32::DARK_GRAY,
         );
+    }
+
+    /// Render the error dialog if an error is being displayed.
+    ///
+    /// Handles user actions from the dialog (retry, close).
+    fn render_error_dialog(&mut self, ctx: &egui::Context) {
+        // Get the action from rendering the dialog
+        let mut renderer = ErrorDialogRenderer::new(&mut self.error_dialog);
+        let action = renderer.render(ctx);
+
+        // Handle dialog actions
+        match action {
+            Some(ErrorDialogAction::Retry) => {
+                // Attempt to reload the file
+                if let Some(path) = self.retry_path.take() {
+                    self.clear_error();
+                    self.load_file(path);
+                }
+            }
+            Some(ErrorDialogAction::Close) => {
+                // Clear the error state
+                self.clear_error();
+                self.retry_path = None;
+            }
+            None => {}
+        }
     }
 }
 

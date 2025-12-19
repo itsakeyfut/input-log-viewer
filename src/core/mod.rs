@@ -1,6 +1,7 @@
 //! Core module for input log data structures and processing.
 
 pub mod config;
+pub mod error;
 pub mod filter;
 pub mod log;
 pub mod parser;
